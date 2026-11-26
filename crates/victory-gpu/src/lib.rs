@@ -78,6 +78,7 @@ mod shadow;
 mod tiles;
 pub mod signature;
 mod switch;
+mod vendor;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod ab;
 #[cfg(windows)]
