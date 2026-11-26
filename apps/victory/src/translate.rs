@@ -252,6 +252,9 @@ pub fn run(
     }
     // `VICTORY_HOST_RDNA=1`: as for an AMD RDNA card (`VICTORY_RDNA_FLOAT`).
     victory_shader::emit::set_host_rdna(std::env::var_os("VICTORY_HOST_RDNA").is_some_and(|v| v == "1"));
+    // `VICTORY_HOST_RDNA4=1`: the RX 9070 XT compiler path (no reuse pass,
+    // a size query's own descriptor handle). Set before any shader is written.
+    victory_shader::emit::set_host_rdna4(std::env::var_os("VICTORY_HOST_RDNA4").is_some_and(|v| v == "1"));
     let dll = validate.then(Validator::default_path).flatten();
     if validate {
         Validator::load(dll.as_deref()).map_err(anyhow::Error::msg)?;
