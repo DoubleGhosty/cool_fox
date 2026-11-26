@@ -1295,17 +1295,17 @@ fn snapshots_kept() -> usize {
 }
 
 /// Returns a snapshot buffer to the pool: at most [`snapshots_kept`] kept,
-/// the largest, and of those the largest one and the next ones up to `KEPT`
-/// bytes in all.
+/// the largest. The first eight stay even past the byte cap (they are the
+/// ones a frame reuses); after those, the cap stops the pool.
 fn give_back(v: Vec<u8>) {
-    const KEPT: usize = 512 << 20;
+    let cap = crate::residency::host_ram().snapshot_bytes;
     let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
     pool.push(v);
     pool.sort_by_key(|v| std::cmp::Reverse(v.capacity()));
     let (mut kept, mut total) = (0, 0usize);
     for v in pool.iter().take(snapshots_kept()) {
         total = total.saturating_add(v.capacity());
-        if kept > 0 && total > KEPT {
+        if kept >= 8 && total > cap {
             break;
         }
         kept += 1;
@@ -5198,7 +5198,7 @@ pub(crate) fn by_address(start: u64, len: u64) -> Option<Arc<Shadow>> {
     static USED: AtomicU64 = AtomicU64::new(0);
     let most = *MOST.get_or_init(|| {
         let mb = std::env::var("VICTORY_MEMORY_CARD_MB").ok().and_then(|v| v.trim().parse::<u64>().ok());
-        mb.unwrap_or(4096) << 20
+        mb.unwrap_or_else(|| crate::residency::host_ram().memory_card_mb) << 20
     });
     let room = host.video_memory().is_none_or(|[budget, used, ..]| used + len < budget / 100 * 97);
     let (staging, data) = host.shared_buffer(len)?;
