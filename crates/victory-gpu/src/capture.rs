@@ -392,12 +392,98 @@ pub(crate) fn dump_targets(frame: u64) {
     }
 }
 
+/// `VICTORY_DUMP_BAKES=1` (with a capture folder): the targets of the
+/// title's decoration and ped-texture bakes ([`crate::draw`]'s
+/// `is_bake_draw`), saved at the next present as
+/// `bake-frame-<n>-<i>-<resource>-<w>x<h>-f<format>.png`, the first 32 of the
+/// run. To tell a bake that comes out wrong (a guard's tattooed arm showed as
+/// coloured noise) from a right bake used wrongly later.
+#[cfg(feature = "diagnostics")]
+static BAKES: std::sync::Mutex<(Vec<(usize, std::sync::Arc<crate::resource::HostTexture>)>, usize)> =
+    std::sync::Mutex::new((Vec::new(), 0));
+
+#[cfg(feature = "diagnostics")]
+const MOST_BAKES: usize = 32;
+
+#[cfg(feature = "diagnostics")]
+fn bakes_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| folder().is_some() && std::env::var_os("VICTORY_DUMP_BAKES").is_some_and(|v| v == "1"))
+}
+
+/// A bake draw renders to `resource`.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn note_bake_target(resource: crate::object::This) {
+    if resource.is_null() || !bakes_on() {
+        return;
+    }
+    let mut bakes = BAKES.lock().unwrap_or_else(|e| e.into_inner());
+    let (pending, saved) = &mut *bakes;
+    if *saved + pending.len() >= MOST_BAKES || pending.iter().any(|&(r, _)| r == resource as usize) {
+        return;
+    }
+    if let Some(copy) = crate::resource::host_copy(resource) {
+        pending.push((resource as usize, copy));
+    }
+}
+
+/// Whether bake targets wait to be saved.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn bakes_waiting() -> bool {
+    bakes_on() && !BAKES.lock().unwrap_or_else(|e| e.into_inner()).0.is_empty()
+}
+
+/// At the present of frame `frame`, every submission having run: saves the
+/// bake targets noted since the last.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn dump_bakes(frame: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (pending, first) = {
+        let mut bakes = BAKES.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = std::mem::take(&mut bakes.0);
+        let first = bakes.1;
+        bakes.1 += pending.len();
+        (pending, first)
+    };
+    let Some(host) = crate::host::host() else { return };
+    for (i, (resource, copy)) in pending.iter().enumerate() {
+        // SAFETY: a live resource.
+        let d = unsafe { copy.texture.GetDesc() };
+        tracing::info!(
+            frame,
+            resource = format_args!("{resource:#x}"),
+            width = d.Width,
+            height = d.Height,
+            format = d.Format.0,
+            levels = d.MipLevels,
+            "a bake target saved (VICTORY_DUMP_BAKES)"
+        );
+        if d.SampleDesc.Count > 1 || d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D {
+            continue;
+        }
+        let state = copy.state.load(Relaxed);
+        dump_one_named(host, &copy.texture, state, frame, &format!("bake-frame-{frame}-{:02}", first + i), *resource as crate::object::This, &d);
+    }
+}
+
 fn dump_one(
     host: &crate::host::Host,
     texture: &ID3D12Resource,
     state: u32,
     frame: u64,
     i: usize,
+    resource: crate::object::This,
+    d: &D3D12_RESOURCE_DESC,
+) {
+    dump_one_named(host, texture, state, frame, &format!("frame-{frame}-{i:02}"), resource, d);
+}
+
+fn dump_one_named(
+    host: &crate::host::Host,
+    texture: &ID3D12Resource,
+    state: u32,
+    frame: u64,
+    stem: &str,
     resource: crate::object::This,
     d: &D3D12_RESOURCE_DESC,
 ) {
@@ -463,10 +549,7 @@ fn dump_one(
             tracing::info!(?resource, depths = ?most(depths), top_bytes = ?most(tops), "24-bit depth plane values (value, texels)");
         }
         if let Some(rgba) = to_rgba(f.Format.0 as u32, f.Width as usize, f.Height as usize, pitch, rows) {
-            let name = format!(
-                "frame-{frame}-{i:02}-{resource:?}-{}x{}-f{}",
-                d.Width, d.Height, d.Format.0
-            );
+            let name = format!("{stem}-{resource:?}-{}x{}-f{}", d.Width, d.Height, d.Format.0);
             save_as(&name, f.Width, f.Height, f.Width as usize * 4, false, &rgba);
         } else {
             tracing::info!(format = f.Format.0, ?resource, "target not dumped: format");
