@@ -214,7 +214,7 @@ impl Detached {
 /// A host list that has run and waits to be used again, and the bytes of
 /// upload memory it keeps.
 #[cfg(windows)]
-struct Idle(crate::host::HostList, u64);
+struct Idle(crate::host::HostList, u64, u64);
 
 // SAFETY: D3D12 objects are free-threaded, and an idle list is touched by
 // nobody until it is taken out again.
@@ -231,14 +231,17 @@ unsafe impl Send for Idle {}
 #[cfg(windows)]
 static IDLE: std::sync::Mutex<(Vec<Idle>, u64)> = std::sync::Mutex::new((Vec::new(), 0));
 
-/// The most host lists kept idle (128 were too few: flights land several at
-/// a time, so lists were thrown away and others made in the same frame, with
-/// their preludes and buffers, 12 % of the submitting thread in the opening,
-/// profile cpu-1), and the most upload memory they may keep
-/// between them (a list keeps scratch chunks over a reset only while lists
-/// do not share them, `VICTORY_SCRATCH_POOL=0`).
+/// The most host lists kept idle, and the most upload memory they may keep
+/// between them. On a 32 GB PC this is 160 lists and 128 MiB
+/// ([`crate::vendor::host_ram`]); `VICTORY_LIST_POOL=0` makes each list new.
 #[cfg(windows)]
-const IDLE_MOST: (usize, u64) = (512, 256 << 20);
+fn idle_most() -> (usize, u64) {
+    static MOST: std::sync::OnceLock<(usize, u64)> = std::sync::OnceLock::new();
+    *MOST.get_or_init(|| {
+        let ram = crate::residency::host_ram();
+        (ram.idle_lists, ram.idle_upload)
+    })
+}
 
 /// Whether host lists that have run are used again (on by default;
 /// `VICTORY_LIST_POOL=0`: each is made new and thrown away, as before).
@@ -255,13 +258,13 @@ fn fresh_list() -> Option<crate::host::HostList> {
     let idle = {
         let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
         let taken = idle.0.pop();
-        if let Some(Idle(_, bytes)) = &taken {
+        if let Some(Idle(_, bytes, _)) = &taken {
             idle.1 -= bytes;
         }
         taken
     };
     match idle {
-        Some(Idle(list, _)) => Some(list),
+        Some(Idle(list, _, _)) => Some(list),
         None => crate::host::host().and_then(|h| h.new_list().ok()),
     }
 }
@@ -279,7 +282,7 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         // The descriptor slots and the upload memory its commands named.
         drop(_state);
         drop(_uploads);
-        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= IDLE_MOST.0 {
+        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= idle_most().0 {
             continue;
         }
         // As the title's reset does: what the list kept for its commands
@@ -287,10 +290,32 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         host.reset();
         let bytes = host.scratch_kept();
         let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
-        if idle.0.len() < IDLE_MOST.0 && idle.1 + bytes <= IDLE_MOST.1 {
-            idle.0.push(Idle(host, bytes));
+        if idle.0.len() < idle_most().0 && idle.1 + bytes <= idle_most().1 {
+            idle.0.push(Idle(host, bytes, crate::host::now_ms()));
             idle.1 += bytes;
         }
+    }
+}
+
+/// Drops idle lists nobody has taken for five seconds. A full pool is last
+/// in, first out, so the ones at the front are never reused and their
+/// command allocators stay at whatever size they once recorded. The ones
+/// a frame actually takes stay. At least 64 stay, so a pause does not
+/// throw the hot pool away. `VICTORY_LIST_POOL=0` has nothing here.
+#[cfg(windows)]
+pub(crate) fn trim_idle() {
+    const QUIET_MS: u64 = 5_000;
+    const FLOOR: usize = 64;
+    let now = crate::host::now_ms();
+    let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
+    while idle.0.len() > FLOOR {
+        let Idle(_, bytes, at) = &idle.0[0];
+        if now.saturating_sub(*at) < QUIET_MS {
+            break;
+        }
+        let bytes = *bytes;
+        idle.0.remove(0);
+        idle.1 = idle.1.saturating_sub(bytes);
     }
 }
 
