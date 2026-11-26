@@ -84,8 +84,17 @@ const PAGE: u64 = 1 << 16;
 const ARENA: u64 = 64 << 20;
 /// What is compared at a time.
 const PIECE: usize = 4096;
-/// Pages held, at most (3 GiB).
-const MOST: usize = 3 << 14;
+/// Pages held, at most. 3 GiB on a large PC; a 32 GB PC holds 1 GiB
+/// (`VICTORY_MEMORY_PAGES` sets the count).
+fn page_cap() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("VICTORY_MEMORY_PAGES")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or_else(|| crate::residency::host_ram().memory_pages)
+    })
+}
 /// Pages of title memory with small title buffers in them, at most.
 const WINDOWS: usize = 512;
 /// The biggest packed structure taken for one.
@@ -369,9 +378,9 @@ impl Memory {
             }
             return false;
         }
-        if self.pages.len() >= MOST {
+        if self.pages.len() >= page_cap() {
             static ONCE: std::sync::Once = std::sync::Once::new();
-            ONCE.call_once(|| tracing::warn!(MOST, "title memory by address: no more pages are taken; others read zeros"));
+            ONCE.call_once(|| tracing::warn!(pages = page_cap(), "title memory by address: no more pages are taken; others read zeros"));
             return false;
         }
         if let Some((copy, at)) = self.free.pop() {
@@ -926,7 +935,7 @@ pub(crate) fn ready(
     if builds && sizes_wait() && asks_size(written, constants, threads) {
         list.first_use(SIZES);
     }
-    while builds && m.free.len() < SPARE && m.pages.len() + m.free.len() < MOST && m.another() {}
+    while builds && m.free.len() < SPARE && m.pages.len() + m.free.len() < page_cap() && m.another() {}
     m.stats.uses[usize::from(builds)] += 1;
     // Once per list and page named: the builder dispatches hundreds of times
     // a frame with the same arguments.
