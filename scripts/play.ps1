@@ -4,13 +4,18 @@
 # -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}
+# -Console      the console the title sees: auto (the default: series-s on a PC with less
+#               than 48 GiB of RAM or 12 GiB of video memory, which series-x runs out of;
+#               the console line of the output says what was chosen and why), series-s,
+#               or series-x (what this script always ran before)
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
 param(
     [Parameter(Mandatory)][string]$Exe,
     [switch]$Safe,
     [switch]$RayTracing,
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
-    [hashtable]$More = @{}
+    [hashtable]$More = @{},
+    [ValidateSet('series-x', 'series-s', 'auto')][string]$Console = 'auto'
 )
 $settings = @{
     VICTORY_TEXTURE_NO_WAIT = '1'; VICTORY_RELAY = '2'; VICTORY_WIDE_BACK = '1'; VICTORY_CARD_REHASH_RUNS = '1'
@@ -35,4 +40,4 @@ Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-O
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
 $Exe = (Resolve-Path $Exe).Path
 Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
-try { & $victory run $Exe --execute } finally { Pop-Location }
+try { & $victory run $Exe --console $Console --execute } finally { Pop-Location }
