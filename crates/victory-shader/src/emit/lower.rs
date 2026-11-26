@@ -1136,6 +1136,33 @@ pub fn set_host_rdna(on: bool) {
     HOST_RDNA.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+static HOST_RDNA4: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The host is RDNA 4 (RX 9070 XT and the other RX 9000 cards). Adrenalin's
+/// compiler faults on two DXIL shapes RDNA 3 accepts, so the size query
+/// takes its own descriptor handle and the reuse pass stays off.
+pub fn set_host_rdna4(on: bool) {
+    HOST_RDNA4.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's choice for [`host_rdna4`], for its thread only.
+    pub(super) static TEST_RDNA4: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether translations should avoid the DXIL that faults inside
+/// `amdxc64.dll`. `VICTORY_HOST_RDNA4=1` forces it (a warm-up before the
+/// device is open).
+pub fn host_rdna4() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_RDNA4.get() {
+        return on;
+    }
+    HOST_RDNA4.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var_os("VICTORY_HOST_RDNA4").is_some_and(|v| v == "1")
+}
+
 #[cfg(test)]
 thread_local! {
     /// A test's choice for [`host_rdna`], for its thread only.
@@ -6544,7 +6571,15 @@ impl<'a> Lower<'a> {
         (first, props, image, uav, used)
         };
         let src = Source::Loaded { load: site, first };
-        let h = self.handle(site, &src, false, props)?;
+        // RDNA 4 faults in amdxc64 when getDimensions and a buffer load share
+        // one descriptor handle and the load's offset comes from that size.
+        // A second handle, and no reuse pass to fold it back, is the shape
+        // that compiles. RDNA 3 keeps the shared handle.
+        let h = if image.is_none() && host_rdna4() {
+            self.fresh_buffer_size_handle(&src, props)?
+        } else {
+            self.handle(site, &src, false, props)?
+        };
         let c = self.cur;
         let i32t = self.s.t.i32;
         let dims = self.s.m.named_struct("dx.types.Dimensions", vec![i32t; 4]);
@@ -7190,6 +7225,19 @@ impl<'a> Lower<'a> {
     }
 
     /// A handle for the descriptor `src` read at `site`.
+    /// A descriptor handle for a buffer's `getDimensions`, not the one a load
+    /// of that buffer uses. One shared handle is what Adrenalin's compiler
+    /// faults on (`amdxc64.dll+0x861b9f`) when the load's offset is that size.
+    fn fresh_buffer_size_handle(&mut self, src: &Source, props: (u32, u32)) -> Result<V, Why> {
+        let Source::Loaded { load, first } = src else {
+            return Err("a buffer size");
+        };
+        let index = self.heap_index(*load, *first, false)?;
+        let (index, bounded) = self.raw_twin(src, index, false, props);
+        let per_lane = self.x.res.waterfall.loads.contains(load);
+        Ok(self.s.heap_handle_at(self.cur, index, false, per_lane, props, bounded))
+    }
+
     fn handle(
         &mut self,
         site: Site,
