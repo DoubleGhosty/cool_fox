@@ -34,5 +34,5 @@ set "VICTORY_CARD_BUFFERS_MB=256"
 set "VICTORY_D3D12_BACKGROUND=0"
 if not defined VICTORY_LOG set "VICTORY_LOG=warn"
 
-"%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute
+"%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute %*
 exit /b %errorlevel%

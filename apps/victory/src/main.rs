@@ -4,6 +4,7 @@
 //! the user's cache directory (outside the repository).
 
 mod census;
+mod dexnom;
 mod inspect;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod replay;
@@ -129,6 +130,8 @@ enum Command {
     },
     /// Prepare, map and bind a title executable; with --execute, run it.
     Run {
+        #[command(flatten)]
+        dexnom: DexNomOptions,
         exe: PathBuf,
         /// What unimplemented imports do when called.
         #[arg(long, value_enum, default_value_t = Unimplemented::Trap)]
@@ -153,6 +156,80 @@ enum Command {
     Replay(replay::Replay),
     /// Show the resolved configuration and check it.
     Config,
+}
+
+/// DexNom/VIctory's launch flags ([`dexnom`]).
+#[derive(clap::Args)]
+struct DexNomOptions {
+    /// Ray tracing on.
+    #[arg(long = "rt", conflicts_with_all = ["no_rt", "rt_static_bvh"])]
+    rt: bool,
+    /// Ray-structure builder, ray activation and hit resolve off.
+    #[arg(long = "no-rt", conflicts_with = "rt_static_bvh")]
+    no_rt: bool,
+    /// Activation and resolve on, structure builder off.
+    #[arg(long = "rt-static-bvh")]
+    rt_static_bvh: bool,
+    /// Texture levels get memory on demand.
+    #[arg(long = "sparse-textures")]
+    sparse_textures: bool,
+    /// Textures go up on a copy queue.
+    #[arg(long = "upload-ahead", conflicts_with = "no_upload_ahead")]
+    upload_ahead: bool,
+    /// No texture copy queue.
+    #[arg(long = "no-upload-ahead")]
+    no_upload_ahead: bool,
+    /// Software adapter (diagnostics builds).
+    #[arg(long = "warp")]
+    warp: bool,
+    /// Accepted for DexNom's command lines; not in this tree (ignored).
+    #[arg(long = "local-gpu-memory")]
+    local_gpu_memory: bool,
+    /// Accepted for DexNom's command lines; not in this tree (ignored).
+    #[arg(long = "native-1440p")]
+    native_1440p: bool,
+    /// Accepted for DexNom's command lines; not in this tree (ignored).
+    #[arg(long = "1080p-to-1440p")]
+    render_1080p_to_1440p: bool,
+    /// Accepted for DexNom's command lines; not in this tree (ignored).
+    #[arg(long = "fsr-quality")]
+    fsr_quality: bool,
+    /// Accepted for DexNom's command lines; not in this tree (ignored).
+    #[arg(long = "fsr-balanced")]
+    fsr_balanced: bool,
+    /// Accepted for DexNom's command lines; not in this tree (ignored).
+    #[arg(long = "fsr-performance")]
+    fsr_performance: bool,
+    /// Accepted for DexNom's command lines; not in this tree (ignored).
+    #[arg(long = "capture-readbacks")]
+    capture_readbacks: bool,
+    /// Accepted for DexNom's command lines; not in this tree (ignored).
+    #[arg(long = "rt-write-stats")]
+    rt_write_stats: bool,
+    /// Accepted for DexNom's command lines; not in this tree (ignored).
+    #[arg(long = "rt-store-trace")]
+    rt_store_trace: bool,
+    /// Accepted for DexNom's command lines; not in this tree (ignored).
+    #[arg(long = "lighting-trace")]
+    lighting_trace: bool,
+}
+
+impl DexNomOptions {
+    /// Sets this tree's switches. Called before the runtime starts.
+    fn apply(&self) {
+        let DexNomOptions { rt, no_rt, rt_static_bvh, sparse_textures, upload_ahead, no_upload_ahead, warp, local_gpu_memory, native_1440p, render_1080p_to_1440p, fsr_quality, fsr_balanced, fsr_performance, capture_readbacks, rt_write_stats, rt_store_trace, lighting_trace } = *self;
+        let flags = dexnom::Flags { rt, no_rt, rt_static_bvh, sparse_textures, upload_ahead, no_upload_ahead, warp, local_gpu_memory, native_1440p, render_1080p_to_1440p, fsr_quality, fsr_balanced, fsr_performance, capture_readbacks, rt_write_stats, rt_store_trace, lighting_trace };
+        let plan = dexnom::plan(flags, |key| std::env::var(key).ok());
+        for (key, value) in plan.set {
+            tracing::warn!(key, value, "set by a launch flag or master switch");
+            // SAFETY: Windows supports setting the environment across threads;
+            // a title that relaunches itself inherits it.
+            unsafe { std::env::set_var(key, value) };
+        }
+        for name in plan.unsupported {
+            tracing::warn!(name, "not in this tree: ignored");
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -217,6 +294,7 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
         Command::Run {
+            dexnom,
             exe,
             unimplemented,
             strict,
@@ -224,6 +302,7 @@ fn main() -> Result<()> {
             console,
             title_args,
         } => {
+            dexnom.apply();
             victory_hle::runtime::set_title_args(title_args);
             run::run(&exe, unimplemented, strict, execute, console)
         }

@@ -1,9 +1,17 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
-if not "%~1"=="" if /i not "%~1"=="pareto-residency" (
-  echo Usage: Play-VIctory.cmd pareto-residency 1>&2
-  exit /b 2
+rem Arguments that begin with "-" are flags of "victory run", handed on.
+set "flags="
+set "first=%~1"
+if not defined first goto :args_done
+if /i "%~1"=="pareto-residency" goto :args_done
+if "%first:~0,1%"=="-" (
+  set "flags=%*"
+  goto :args_done
 )
+echo Usage: Play-VIctory.cmd [pareto-residency ^| flags] 1>&2
+exit /b 2
+:args_done
 if not defined VICTORY_GAME_DIR set "VICTORY_GAME_DIR=%~dp0..\GTA6.Xbox.v1.0.2.1"
 if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
   echo Set VICTORY_GAME_DIR to your own dump folder containing game_scarlett_master.exe. 1>&2
@@ -53,5 +61,5 @@ if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn"
 rem Series X, not S: on an 8 GB card series-s drops the head/skin meshes (faces
 rem render as eyes and teeth only); series-x renders them. Verified 2026-11-26.
-"%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-x --execute
+"%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-x --execute %flags%
 exit /b %errorlevel%
