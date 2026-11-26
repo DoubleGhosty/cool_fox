@@ -28,9 +28,10 @@ use windows::core::{GUID, HRESULT, IUnknown, Interface};
 /// Bytes of a block; pieces of more than half of one are not pooled (with
 /// blocks made ahead, [`ahead`]: of more than one).
 const BLOCK: u64 = 64 << 20;
-/// Blocks with nothing in them that are kept.
+/// Blocks with nothing in them that are kept when the budget is unknown.
 const SPARE: usize = 2;
-/// The same while the card has room ([`room`]): 4 GiB of them.
+/// Starting cap of the texture pool (4 GiB). The live spare count is lower
+/// on a 16 GB card; see [`crate::vendor::spare_blocks`].
 const SPARE_KEPT: usize = 64;
 /// The same of blocks of staging buffers, which are the PC's memory: run
 /// crash-1 held 5.2 GB of them.
@@ -38,9 +39,9 @@ const STAGING_KEPT: usize = 8;
 /// How many are kept now.
 static SPARES: AtomicUsize = AtomicUsize::new(SPARE);
 
-/// Sets how many empty blocks stay, by the card's memory (budget and use):
-/// [`SPARE_KEPT`] below 85 % ([`crate::host::keep_freed`]), else [`SPARE`].
-/// Asked once a second.
+/// Sets how many empty blocks stay, from the card's budget
+/// ([`crate::vendor::spare_blocks`]). A 16 GB RX 9070 XT keeps 1 GiB while
+/// it is under 85%; 24 GB and above keep 4 GiB. Asked once a second.
 pub(crate) fn room(memory: Option<[u64; 4]>) {
     let pressure = crate::residency::pressured();
     let limit = spares(memory, crate::host::keep_freed() && !pressure);
@@ -65,8 +66,8 @@ pub(crate) fn room(memory: Option<[u64; 4]>) {
 
 fn spares(memory: Option<[u64; 4]>, keep: bool) -> usize {
     match memory {
-        Some([budget, used, ..]) if keep && u128::from(used) * 100 < u128::from(budget) * 85 => SPARE_KEPT,
-        _ => SPARE,
+        Some([budget, used, ..]) => crate::vendor::spare_blocks(budget, used, keep),
+        None => crate::vendor::spare_blocks(0, 0, keep),
     }
 }
 
@@ -599,9 +600,14 @@ mod tests {
 
     #[test]
     fn empty_blocks_stay_while_the_card_has_room() {
-        assert_eq!(spares(Some([100, 84, 0, 0]), true), SPARE_KEPT);
-        assert_eq!(spares(Some([100, 85, 0, 0]), true), SPARE);
-        assert_eq!(spares(Some([100, 10, 0, 0]), false), SPARE);
+        const GIB: u64 = 1 << 30;
+        // 16 GB class (RX 9070 XT, WDDM budget under 20 GiB): 1 GiB of empty blocks.
+        assert_eq!(spares(Some([15 * GIB, GIB, 0, 0]), true), 16);
+        // 24 GB and above keep the previous 4 GiB.
+        assert_eq!(spares(Some([22 * GIB, GIB, 0, 0]), true), SPARE_KEPT);
+        // At 85% and above the reserve drops back to two blocks.
+        assert_eq!(spares(Some([15 * GIB, 15 * GIB, 0, 0]), true), SPARE);
+        assert_eq!(spares(Some([15 * GIB, GIB, 0, 0]), false), SPARE);
         assert_eq!(spares(None, true), SPARE);
     }
 
