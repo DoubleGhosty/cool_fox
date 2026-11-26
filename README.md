@@ -1,21 +1,42 @@
-# VIctory on an RX 7900 XTX
+# VIctory on an RX 9070 XT
 
-## Run the codec_d Windows build
+## Run it on Windows (RX 9070 XT)
 
-Download and extract the Windows x64 ZIP from the [private releases](https://github.com/codec-d/cool_fox/releases/latest). Open PowerShell in the extracted folder and point the launcher at your own complete Xbox dump.
+This tree targets a 16 GB Radeon. The old `pareto-residency` launcher is the RTX 5090 residency build: it was happy holding about 18 GB of GPU memory, which does not fit a 9070 XT. Build on the Windows machine with the card. The prebuilt `victory-3d-rtx-pareto-residency.exe` is not this path.
+
+You need Windows 10 or 11 x64, an AVX2 CPU, the pinned Rust toolchain, the MSVC C++ build tools with a Windows SDK, and your own dump of the title. The 9070 XT has mesh shaders and shader model 6.6, which the title needs. A Ryzen iGPU in the same PC is skipped.
 
 ```powershell
+cd cool_fox
+cargo build --release --locked -p victory
 $env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
-.\Play-VIctory.cmd pareto-residency
+.\Play-VIctory.cmd
 ```
 
-The launcher selects Series S and the RTX-tested residency settings. It builds its shader cache locally under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
+Use this tree on the Windows PC. Cloning `DoubleGhosty/cool_fox` again gets the unmodified mirror, which is still the RTX launcher.
 
-To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
+`Play-VIctory.cmd` with no argument is the 9070 profile:
+
+- `VICTORY_GPU=amd` so the device is the Radeon, not an iGPU and not a leftover NVIDIA card. If two Radeons are installed, set `VICTORY_D3D12_ADAPTER=9070`.
+- Series S, which is the memory profile that fits 16 GB. `Play-VIctory.cmd 9070-x` is Series X and wants about 64 GB of system RAM.
+- A shader cache of its own at `%LOCALAPPDATA%\VIctory\cache-rdna4`, not the RTX cache. The first run stutters while the driver builds pipelines. `target\release\victory.exe warm --used` does that ahead of time.
+- Textures are kept to about 82% of the card's Windows budget, empty texture blocks stay at 1 GB instead of 4 GB, and mip levels are uploaded as they are needed. The RTX knob that pinned every small buffer on the card is not set.
+- Console shaders stay wave64. RDNA4 runs that natively. The wave32 barrier form that was only checked on RTX stays off, because it reset the card.
+- The DXIL clean-up that reuses one instruction for one value stays off (`VICTORY_SHADER_OPT=59`). Adrenalin's compiler faults on that form on an RX 9070 XT (`amdxc64.dll+0x861b9f`) and does not on an RX 7900 XTX. A buffer size query also gets its own descriptor handle, which is the other form that compiler faults on.
+
+`scripts\play.ps1 -Exe <path> -Gpu amd` is the same profile. `-RayTracing` turns the title's ray-traced indirect light on (slower). `-Safe` drops the newest scheduling switches when something draws wrong.
+
+Every `victory run --execute` precompiles the shaders in the game folder into the cache, then loads the host pipelines recorded on earlier launches, before the title starts. The first launch is the long one. Later launches reuse the cache and only compile pipelines that are new. `VICTORY_PRELOAD=0` skips both. The pipeline book is on unless `VICTORY_PIPELINE_BOOK=0`. Preload uses four threads (`VICTORY_PRELOAD_JOBS`).
+
+A 32 GB PC is the size this profile expects. The frame path stays the measured one: eight joined parts, and 192 lists in the air (128 was the count that still stopped the submitting thread). What is not in the current frame is released. Idle command lists nobody has taken for five seconds go, so a streaming spike does not leave its allocators behind. The pipeline library leaves the working set two seconds after a burst of loads, and stays in Windows' file cache. Texture staging that nothing has used for two seconds is cut back to 1.5 GB. A machine with more than 40 GB keeps the old sizes unless those variables are set.
+
+`Play-VIctory.cmd pareto-residency` is still the RTX path.
+
+The sections below describe the earlier RX 7900 XTX fork this code grew from. The 16 GB budgets above are what changed for the 9070 XT; the 7900 XTX (24 GB) still uses the wider limits when the card's budget is 20 GB or more.
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.
-This one is about **speed on AMD RDNA 3**: the world at 30 frames a second on
+This one is about **speed on AMD RDNA**: the world at 30 frames a second on
 one PC, without giving up the picture. It is not there yet.
 
 **This repository contains no game files, code or assets.** You need your own

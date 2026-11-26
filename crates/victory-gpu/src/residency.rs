@@ -5,8 +5,19 @@ use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORY
 
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
-static PRESSURED: AtomicBool = AtomicBool::new(false);
-static HEADROOM: AtomicU64 = AtomicU64::new(u64::MAX);
+static VRAM_BUDGET: AtomicU64 = AtomicU64::new(0);
+static VRAM_USED: AtomicU64 = AtomicU64::new(0);
+
+/// The card's local budget and what this process holds, from
+/// [`crate::host::Host::video_memory`]. Zero budget means no sample yet.
+pub(crate) fn note_vram(budget: u64, used: u64) {
+    VRAM_BUDGET.store(budget, Ordering::Relaxed);
+    VRAM_USED.store(used, Ordering::Relaxed);
+}
+
+fn vram_pace_now() -> crate::vendor::VramPace {
+    crate::vendor::vram_pace(VRAM_BUDGET.load(Ordering::Relaxed), VRAM_USED.load(Ordering::Relaxed))
+}
 
 fn memory_status() -> Option<MEMORYSTATUSEX> {
     // SAFETY: the API initializes the fields of a correctly sized structure.
@@ -92,7 +103,17 @@ pub(crate) fn allow_staging_growth(bake: bool) -> bool {
 
 pub(crate) fn limited_host_ram() -> bool {
     static LIMITED: OnceLock<bool> = OnceLock::new();
-    *LIMITED.get_or_init(|| memory_status().is_some_and(|s| s.ullTotalPhys <= 32 * GIB))
+    *LIMITED.get_or_init(|| memory_status().is_some_and(|s| s.ullTotalPhys <= 40 * GIB))
+}
+
+/// Pool sizes for this PC. A missing sample is treated as 32 GB, which is
+/// what this tree is built for.
+pub(crate) fn host_ram() -> crate::vendor::HostRam {
+    static RAM: OnceLock<crate::vendor::HostRam> = OnceLock::new();
+    *RAM.get_or_init(|| {
+        let total = memory_status().map(|s| s.ullTotalPhys).unwrap_or(32 * GIB);
+        crate::vendor::host_ram(total)
+    })
 }
 
 fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
@@ -149,9 +170,10 @@ pub(crate) fn critical_commit() -> bool {
 /// A soft per-frame admission limit. A single texture can cross it. The
 /// queue retains unserved slots so they can be retried on later frames.
 pub(crate) fn prefetch_limit(bytes: u64, pressure: bool, critical: bool, limited: bool, staging: u64) -> u64 {
-    if critical {
+    let pace = vram_pace_now();
+    if critical || pace == crate::vendor::VramPace::Critical {
         bytes.min(16 << 20)
-    } else if pressure || (limited && staging >= GIB) {
+    } else if pressure || pace == crate::vendor::VramPace::Tight || (limited && staging >= GIB) {
         bytes.min(64 << 20)
     } else {
         bytes

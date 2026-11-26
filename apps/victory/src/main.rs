@@ -105,10 +105,9 @@ enum Command {
         #[arg(long)]
         jobs: Option<usize>,
     },
-    /// Make the host pipelines of every pipeline the title ever created
-    /// (runs with `VICTORY_PIPELINE_BOOK=1` write them down), so that the
-    /// driver's cache on disk has them before a run needs one: once per change
-    /// of the translator or the driver. Goes on where it was stopped.
+    /// Make the host pipelines of every pipeline the title ever created.
+    /// `run` does this on every launch. A run with `VICTORY_PIPELINE_BOOK=0`
+    /// does not write the book this reads. Goes on where it was stopped.
     #[cfg(windows)]
     Warm {
         /// Processes at once (default: two thirds of the logical cores).
