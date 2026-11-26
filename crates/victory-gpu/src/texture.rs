@@ -543,6 +543,36 @@ pub(crate) fn let_go_idle() {
     if went > 0 {
         crate::host::trail(|| format!("sweep: {went} staging buffers of textures let go ({} KiB), held by no list", bytes >> 10));
     }
+    let ceiling = crate::residency::host_ram().staging_ceiling;
+    let alive = STAGED[1].load(Relaxed);
+    if ceiling == 0 || alive <= ceiling {
+        return;
+    }
+    // Over the ceiling, staging unused for two seconds goes, oldest first.
+    // A texture a list still holds, or one used in the last two seconds, stays,
+    // so the frame in front of the camera is not uploaded again.
+    const COLD_MS: u64 = 2_000;
+    let mut cold: Vec<(u64, u64)> = map
+        .iter()
+        .filter(|(_, s)| {
+            Arc::strong_count(s) == 1 && crate::host::long_ago(s.used.load(Relaxed), COLD_MS, IDLE_FRAMES)
+        })
+        .map(|(key, s)| (s.used.load(Relaxed) & 0xffff_ffff, *key))
+        .collect();
+    cold.sort_unstable();
+    let mut over = alive - ceiling;
+    let mut dropped = 0u64;
+    for (_, key) in cold {
+        if over == 0 {
+            break;
+        }
+        let Some(s) = map.remove(&key) else { continue };
+        over = over.saturating_sub(s.bytes);
+        dropped += s.bytes;
+    }
+    if dropped > 0 {
+        crate::host::trail(|| format!("sweep: cold texture staging let go ({} KiB) past the ceiling", dropped >> 10));
+    }
 }
 
 /// Textures the host GPU wrote by a copy or resolve: their contents are on
