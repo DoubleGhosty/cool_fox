@@ -188,12 +188,39 @@ pub fn run(
     victory_hle::runtime::set_title_dll_loader(Box::new(move |file| {
         late.load(file, show).map_err(|e| format!("{e:#}"))
     }));
+    // Every launch: translate the title's shaders into the cache, then make
+    // the host pipelines already known. `VICTORY_PRELOAD=0` skips both.
+    if let Err(e) = preload_shaders(title_dir) {
+        println!("shaders        preload stopped: {e:#}");
+    }
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
     let code = main
         .join()
         .map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
     println!("title exited with {code}");
+    Ok(())
+}
+
+/// Translates every shader under the title folder into the cache, then asks
+/// the driver to compile the pipelines earlier runs recorded. Both run on
+/// every launch so a cold cache is filled before the first frame, and a warm
+/// cache is loaded into the driver before the title starts.
+/// `VICTORY_PRELOAD=0` does neither.
+#[cfg(windows)]
+fn preload_shaders(title_dir: &Path) -> Result<()> {
+    if std::env::var_os("VICTORY_PRELOAD").is_some_and(|v| v == "0") {
+        println!("shaders        preload off (VICTORY_PRELOAD=0)");
+        return Ok(());
+    }
+    println!("shaders        precompiling {}", title_dir.display());
+    let jobs = std::env::var("VICTORY_PRELOAD_JOBS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(4);
+    crate::translate::precompile(vec![title_dir.to_owned()], Some(jobs))?;
+    println!("shaders        preloading host pipelines");
+    crate::warm::run(None, None, false, false, None)?;
     Ok(())
 }
 

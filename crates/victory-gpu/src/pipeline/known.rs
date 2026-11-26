@@ -1,7 +1,8 @@
-//! Every pipeline the title has ever created, kept on disk
-//! (`VICTORY_PIPELINE_BOOK=1`), and their host pipelines made ahead of a run
-//! (`victory warm`), so that the driver's own cache on disk has them before
-//! a draw asks for one.
+//! Every pipeline the title has ever created, kept on disk, and their host
+//! pipelines made ahead of a run (`victory warm`), so that the driver's own
+//! cache on disk has them before a draw asks for one. The book is on unless
+//! `VICTORY_PIPELINE_BOOK=0`. A run precompiles shaders and warms this book
+//! before the title starts.
 //!
 //! The title creates 84,000 pipelines while it loads and draws with some
 //! 2,000 of them; which ones is known from earlier runs (`library`), and
@@ -37,10 +38,10 @@ const PIPELINES: &str = "known-pipelines.bin";
 const STAGES: [&str; 8] =
     ["vertex", "pixel", "domain", "hull", "geometry", "compute", "amplification", "mesh"];
 
-/// `VICTORY_PIPELINE_BOOK=1`: the pipelines the title creates are kept.
+/// The pipelines the title creates are kept, unless `VICTORY_PIPELINE_BOOK=0`.
 fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_BOOK").is_some_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_BOOK").is_none_or(|v| v != "0"))
 }
 
 struct Book {

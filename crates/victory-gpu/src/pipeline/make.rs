@@ -469,17 +469,16 @@ fn next(screens_only: bool) -> Arc<Pending> {
 }
 
 /// How many workers make pipelines: `asked` (`VICTORY_PIPELINE_WORKERS`, 1 to
-/// 64), else two thirds of the logical processors, 2 to 16. They run below the
-/// title's own threads, and a cold cache queues hundreds at once.
+/// 64), else two thirds of the logical processors, from 2 up to `cap`
+/// (4 on a 32 GB PC). They run below the title's own threads.
 fn worker_count(asked: Option<usize>, processors: usize) -> usize {
-    worker_count_for(asked, processors, false)
+    worker_count_for(asked, processors, 16)
 }
 
-fn worker_count_for(asked: Option<usize>, processors: usize, limited_ram: bool) -> usize {
+fn worker_count_for(asked: Option<usize>, processors: usize, cap: usize) -> usize {
     match asked {
         Some(n) => n.clamp(1, 64),
-        None if limited_ram => (processors * 3 / 4).clamp(2, 8),
-        None => (processors * 2 / 3).clamp(2, 16),
+        None => (processors * 2 / 3).clamp(2, cap),
     }
 }
 
@@ -493,7 +492,7 @@ fn workers() -> bool {
                 .ok()
                 .and_then(|v| v.trim().parse().ok()),
             std::thread::available_parallelism().map_or(2, |n| n.get()),
-            crate::residency::limited_host_ram(),
+            crate::residency::host_ram().pipeline_workers,
         );
         tracing::info!(workers, "pipeline workers");
         let screens = if screens_first() { SCREEN_WORKERS } else { 0 };
@@ -566,10 +565,10 @@ mod tests {
         assert_eq!(worker_count(None, 64), 16);
         assert_eq!(worker_count(Some(0), 24), 1);
         assert_eq!(worker_count(Some(20), 24), 20);
-        assert_eq!(worker_count_for(None, 8, true), 6);
-        assert_eq!(worker_count_for(None, 16, true), 8);
-        assert_eq!(worker_count_for(None, 24, true), 8);
-        assert_eq!(worker_count_for(Some(12), 8, true), 12);
+        assert_eq!(worker_count_for(None, 8, 4), 4);
+        assert_eq!(worker_count_for(None, 16, 4), 4);
+        assert_eq!(worker_count_for(None, 24, 4), 4);
+        assert_eq!(worker_count_for(Some(12), 8, 4), 12);
     }
 
     /// A first use queues the pipeline and, within the budget, gets the
