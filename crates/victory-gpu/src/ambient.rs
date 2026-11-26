@@ -459,9 +459,12 @@ const CELL_BYTES: u64 = (2 * CELLS + 1) * 16;
 const POINT_BYTES: u64 = 160 * 90 * 48;
 
 /// Views of what the march clamp writes, a ring.
-/// shortcut: a view must last until its list has run; with a few clamps a
-/// frame the ring is far from coming round.
-const MARCH_VIEWS: u32 = 64;
+/// shortcut: a view must last until its list has run, and nothing here
+/// waits for that: the ring is only long. The clamp takes up to 8 a frame,
+/// so 4,096 come round after about 500 frames, where 64 came round after 8;
+/// upgrade to slots retired by the list's fence if lists are ever held that
+/// long.
+const MARCH_VIEWS: u32 = 4096;
 
 struct Pass {
     root: ID3D12RootSignature,
