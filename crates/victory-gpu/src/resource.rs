@@ -1668,8 +1668,8 @@ fn texture_floor_bytes(vram_budget: Option<u64>) -> u64 {
 /// Whether more host copies of textures the title fills may be made for
 /// shaders that pick textures by index (`draw.rs` `heap_textures`): always
 /// up to [`texture_floor_bytes`] bytes of them, beyond that while the card's
-/// memory in use by this process is under nine tenths of the budget the system
-/// gives it ([`room_percent`] says another share; `VICTORY_TEXTURE_BUDGET_MB`
+/// memory in use by this process is under the share [`texture_room_percent`] allows of the budget the system
+/// gives it ([`texture_room_percent`] says another share; `VICTORY_TEXTURE_BUDGET_MB`
 /// sets a limit on those copies' bytes instead). Past the budget the system moves the card's memory into the PC's,
 /// which ended runs 20 and 24.
 #[cfg(windows)]
@@ -1698,7 +1698,7 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
         // used.
         Some([budget, used, ..]) => {
             used.saturating_sub(crate::pool::texture_room()) + crate::shadow::card_room_kept() + targets_room_kept()
-                < budget / 100 * room_percent()
+                < budget / 100 * texture_room_percent(Some(budget))
         }
         None => filled < WITHOUT_BUDGET,
     }
@@ -1755,21 +1755,19 @@ pub(crate) fn room_lately() -> bool {
 }
 
 /// The share of the card's budget, in percent, up to which host copies of
-/// textures picked by index are made ([`room`]): 90 unless
-/// `VICTORY_TEXTURE_ROOM_PERCENT` says another (50 to 97). At 90 about a
-/// tenth of the budget, 1,020 MB of 10,200, stays unused while thousands of
-/// textures wait (runs 170-174); the card copies of title buffers from
-/// 1 MiB up take 449 MB more of the card than before (941 against 492),
-/// and 94 gives the textures about that much back.
+/// textures picked by index are made ([`room`]).
+/// `VICTORY_TEXTURE_ROOM_PERCENT` sets it (50 to 97). Otherwise a budget
+/// under 20 GiB (an RX 9070 XT's 16 GB, after Windows takes its reserve)
+/// uses 82, and a larger card keeps 90.
 #[cfg(windows)]
-fn room_percent() -> u64 {
-    static PERCENT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *PERCENT.get_or_init(|| {
+fn texture_room_percent(budget: Option<u64>) -> u64 {
+    static OVERRIDE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let override_percent = *OVERRIDE.get_or_init(|| {
         std::env::var("VICTORY_TEXTURE_ROOM_PERCENT")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
-            .map_or(90, |percent| percent.clamp(50, 97))
-    })
+    });
+    crate::vendor::texture_room_percent(budget, override_percent)
 }
 
 /// For the card accounting line ([`card_accounting`]): the title texture
