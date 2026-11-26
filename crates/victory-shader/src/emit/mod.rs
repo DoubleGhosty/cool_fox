@@ -118,7 +118,7 @@ use crate::{ShaderError, io, ir, resource, structure};
 
 pub use bitcode::census;
 pub use sampler::StaticSampler;
-pub use lower::{host_settings, set_host_max_wave, set_host_rdna};
+pub use lower::{host_settings, set_host_max_wave, set_host_rdna, set_host_rdna4};
 pub use rect::rect_list_gs;
 pub use shader::{
     MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
@@ -206,7 +206,11 @@ pub fn builder_bounds() -> bool {
 /// is exact, so the switch is for telling a translator fault from a
 /// clean-up fault, and for measuring what the clean-up is worth.
 /// `VICTORY_SHADER_OPT`:
-/// - unset: every pass but the last one below (63).
+/// - unset: every pass but the wide loads (63). On RDNA 4
+///   ([`lower::host_rdna4`]) the "one instruction for one value" pass is
+///   left out as well (59). Adrenalin's compiler (`amdxc64.dll+0x861b9f`)
+///   faults on the DXIL that pass writes, on an RX 9070 XT, and does not
+///   on an RX 7900 XTX.
 /// - `0`: none (the module as the lowering made it).
 /// - a number (decimal or `0x` hex): those passes; 1 dead code, 2 constants
 ///   and identities, 4 one instruction for one value, 8 what a branch taken
@@ -220,7 +224,7 @@ pub fn builder_bounds() -> bool {
 /// does).
 pub fn shader_opt() -> u32 {
     static PASSES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *PASSES.get_or_init(|| parse_shader_opt(std::env::var("VICTORY_SHADER_OPT").ok().as_deref()))
+    *PASSES.get_or_init(|| shader_opt_for(std::env::var("VICTORY_SHADER_OPT").ok().as_deref(), lower::host_rdna4()))
 }
 
 /// On a host whose shaders run on the console's own kind of hardware (AMD
@@ -295,12 +299,38 @@ pub fn translation_fingerprint() -> Vec<u8> {
     }
     out.extend_from_slice(&lower::host_max_wave().to_le_bytes());
     out.extend_from_slice(&lower::host_rdna().to_le_bytes());
+    out.push(u8::from(lower::host_rdna4()));
     out.extend_from_slice(&shader::view_heap_limit().to_le_bytes());
     out.extend_from_slice(&shader::raw_views().to_le_bytes());
     out.extend_from_slice(&loop_limit().to_le_bytes());
     out.push(group_sync());
     out.extend_from_slice(&shader_opt().to_le_bytes());
     out
+}
+
+/// `VICTORY_SHADER_OPT`'s value. Unset, every pass but the wide loads; on
+/// RDNA 4, also without the pass that reuses one instruction for one value.
+/// Pure, for testing.
+pub(crate) fn shader_opt_for(value: Option<&str>, rdna4: bool) -> u32 {
+    let set = value.map(str::trim).filter(|v| !v.is_empty());
+    if set.is_some() {
+        return parse_shader_opt(set);
+    }
+    let bits = bitcode::opt::DEFAULT;
+    if rdna4 { bits & !bitcode::opt::REUSE } else { bits }
+}
+
+#[cfg(test)]
+mod shader_opt_rdna4 {
+    use super::bitcode::opt::{DEFAULT, REUSE};
+
+    #[test]
+    fn an_rx_9070_xt_leaves_out_the_pass_amdxc64_faults_on() {
+        assert_eq!(super::shader_opt_for(None, false), DEFAULT);
+        assert_eq!(super::shader_opt_for(None, true), DEFAULT & !REUSE);
+        assert_eq!(DEFAULT & !REUSE, 59);
+        assert_eq!(super::shader_opt_for(Some("63"), true), 63);
+    }
 }
 
 /// `VICTORY_SHADER_OPT`'s value; every pass when it is unset or
@@ -541,14 +571,16 @@ pub fn emit(
         // has no barrier, stays on.
         let wide_option = std::env::var_os("VICTORY_WAVE_WIDE");
         // Both archived kernels use one logical wave per group and have
-        // validated wave32 PSOs on RTX. Explicit policy wins.
+        // validated wave32 PSOs on RTX. On RDNA, including an RX 9070 XT,
+        // the device reports a 64-lane maximum and this barrier form reset
+        // the card (runs 121-124). Explicit `VICTORY_WAVE_WIDE=1` still forces it.
         let scene_kernel = matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 64)
             && matches!(
                 c.digest,
                 [0x58, 0x1d, 0xab, 0x2c, 0xd8, 0xbc, 0xf2, 0x2e, 0x5c, 0x96, 0x4b, 0x98, 0xe9, 0x03, 0x48, 0xd1]
                     | [0x24, 0x31, 0xbb, 0xe7, 0xdc, 0x15, 0x4a, 0xd7, 0x59, 0xd2, 0x0b, 0xc9, 0x54, 0x82, 0x9c, 0x1c]
             );
-        let wide_on = wide_option.as_ref().map_or(scene_kernel, |v| v == "1");
+        let wide_on = wide_option.as_ref().map_or(scene_kernel && lower::host_max_wave() == 32, |v| v == "1");
         // A single guest wave can iterate an active-lane loop until both host
         // halves have finished. The precise latch and convergence conditions
         // for the driver compute route are checked by widen().
