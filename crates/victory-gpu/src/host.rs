@@ -1610,7 +1610,12 @@ impl PlanePass {
         // SAFETY: the root signature is inside the pixel shader; the
         // description points at live data and never releases its pointer.
         unsafe {
-            let root: ID3D12RootSignature = device.CreateRootSignature(0, &ps[..])?;
+            // As the shader's `RS`, made here: Wine's compiler embeds none.
+            let root = crate::rootsig::make(
+                device,
+                &[crate::rootsig::Param::SrvTable { register: 0, count: 1, visibility: D3D12_SHADER_VISIBILITY_PIXEL }],
+                "depth plane",
+            )?;
             let desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
                 pRootSignature: std::mem::transmute_copy(&root),
                 VS: code(&vs[..]),
@@ -3843,6 +3848,8 @@ fn late_line(frames: f64) {
         );
     }
     card_steps::log(frames);
+    card_steps::log(frames);
+    crate::port_cbv::log(frames);
     crate::picked::log(frames);
     #[cfg(feature = "diagnostics")]
     log_blame(frames);
