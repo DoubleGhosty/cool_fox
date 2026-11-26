@@ -376,7 +376,11 @@ pub(crate) fn trim() {
     {
         return;
     }
-    let quiet_ms = crate::host::ram_idle_ms(crate::host::available_physical_ram());
+    let quiet_ms = {
+        let idle = crate::host::ram_idle_ms(crate::host::available_physical_ram());
+        let sooner = crate::residency::host_ram().library_quiet_ms;
+        if sooner == 0 { idle } else { sooner.min(idle) }
+    };
     if crate::host::now_ms() < LOADED_AT.load(Ordering::Relaxed) + quiet_ms
         || TRIMMED.swap(true, Ordering::Relaxed)
     {
