@@ -8,11 +8,16 @@
 #               than 48 GiB of RAM or 12 GiB of video memory, which series-x runs out of;
 #               the console line of the output says what was chosen and why), series-s,
 #               or series-x (what this script always ran before)
+# -UploadAhead  textures' first uploads on a copy queue of their own (VICTORY_UPLOAD_AHEAD),
+#               on by default before: on an RTX 5060 with 16 GB it left decals, posters and
+#               tattoos black in the prison corridor and frames were longer with it (median
+#               170 against 159 ms, p90 424 against 206; runs 05 and 07, docs/bug-journal.md)
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
 param(
     [Parameter(Mandatory)][string]$Exe,
     [switch]$Safe,
     [switch]$RayTracing,
+    [switch]$UploadAhead,
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{},
     [ValidateSet('series-x', 'series-s', 'auto')][string]$Console = 'auto'
@@ -26,8 +31,9 @@ $settings = @{
 if ($Safe) {
     $settings.VICTORY_UNDER_WIDE = '0'; $settings.VICTORY_LAND_ECHO = '0'
 } else {
-    $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
+    $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'
 }
+if ($UploadAhead) { $settings.VICTORY_UPLOAD_AHEAD = '1' }
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
