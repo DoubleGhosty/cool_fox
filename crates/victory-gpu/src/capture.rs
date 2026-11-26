@@ -47,7 +47,22 @@ pub(crate) fn listed(n: u64) -> bool {
     });
     let first = WORLD.load(std::sync::atomic::Ordering::Relaxed);
     let after = n.wrapping_sub(first);
-    named || first != u64::MAX && ([2, 6, 30, 80].contains(&after) || also.contains(&after))
+    named || bake_listed(n) || first != u64::MAX && ([2, 6, 30, 80].contains(&after) || also.contains(&after))
+}
+
+/// Frames listed from their first bake draw on (`VICTORY_DUMP_BAKES`): what
+/// the bakes read, and what is done with their targets after them.
+#[cfg(feature = "diagnostics")]
+static BAKE_FRAMES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(feature = "diagnostics")]
+fn bake_listed(n: u64) -> bool {
+    BAKE_FRAMES.lock().unwrap_or_else(|e| e.into_inner()).contains(&n)
+}
+
+#[cfg(not(feature = "diagnostics"))]
+fn bake_listed(_: u64) -> bool {
+    false
 }
 
 /// With a capture folder, for the frames [`listed`]: `what` is added to
@@ -416,6 +431,16 @@ fn bakes_on() -> bool {
 pub(crate) fn note_bake_target(resource: crate::object::This) {
     if resource.is_null() || !bakes_on() {
         return;
+    }
+    {
+        // The frame being built is listed from here on, the first 6 such.
+        const MOST_FRAMES: usize = 6;
+        let frame = crate::queue::presented() + 1;
+        let mut frames = BAKE_FRAMES.lock().unwrap_or_else(|e| e.into_inner());
+        if frames.len() < MOST_FRAMES && !frames.contains(&frame) {
+            frames.push(frame);
+            tracing::info!(frame, "a frame with a bake is listed from its first bake draw on (VICTORY_DUMP_BAKES)");
+        }
     }
     let mut bakes = BAKES.lock().unwrap_or_else(|e| e.into_inner());
     let (pending, saved) = &mut *bakes;
