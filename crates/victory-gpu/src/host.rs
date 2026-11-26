@@ -221,9 +221,17 @@ fn wait_resident() -> bool {
 }
 
 /// The flag memory is made with that [`resident`] waits for.
+/// A driver that refuses `CREATE_NOT_RESIDENT` (probed once at device
+/// creation) gets plain resident allocations instead.
 pub(crate) fn not_resident() -> D3D12_HEAP_FLAGS {
-    if wait_resident() { D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT } else { D3D12_HEAP_FLAG_NONE }
+    if wait_resident() && NOT_RESIDENT_OK.load(Ordering::Relaxed) {
+        D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT
+    } else {
+        D3D12_HEAP_FLAG_NONE
+    }
 }
+
+static NOT_RESIDENT_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// A queue of its own that new memory is waited for with ([`mapped`]).
 struct Aside {
@@ -444,6 +452,7 @@ fn sweep() {
     if crate::residency::pressured() {
         trim_spare_chunks();
     }
+    crate::list::trim_idle();
     crate::pool::room(host().and_then(|h| h.video_memory()));
     crate::pipeline::trim_library();
     crate::shadow::let_go_idle();
@@ -497,7 +506,7 @@ pub(crate) fn retire_resource(object: ID3D12Resource) {
 fn bury_lag() -> u64 {
     static LAG: OnceLock<u64> = OnceLock::new();
     *LAG.get_or_init(|| {
-        let default = if crate::residency::limited_host_ram() { 16 } else { 64 };
+        let default = crate::residency::host_ram().bury_lag;
         std::env::var("VICTORY_BURY_LAG").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
     })
 }
@@ -842,6 +851,157 @@ pub(crate) fn host() -> Option<&'static Host> {
     .as_ref()
 }
 
+fn adapter_name(wide: &[u16]) -> String {
+    let end = wide.iter().position(|&unit| unit == 0).unwrap_or(wide.len());
+    String::from_utf16_lossy(&wide[..end])
+}
+
+/// Every DXGI adapter. Software adapters are listed and then rejected by
+/// [`crate::vendor::rank_adapters`].
+fn list_adapters() -> windows::core::Result<Vec<(IDXGIAdapter1, crate::vendor::AdapterFact)>> {
+    // SAFETY: plain DXGI enumeration.
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
+        let mut out = Vec::new();
+        let mut index = 0u32;
+        loop {
+            match factory.EnumAdapters1(index) {
+                Ok(adapter) => {
+                    if let Ok(desc) = adapter.GetDesc1() {
+                        let name = adapter_name(&desc.Description);
+                        let software = desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0;
+                        tracing::info!(
+                            index,
+                            name = %name,
+                            vendor = format_args!("{:#06x}", desc.VendorId),
+                            device = format_args!("{:#06x}", desc.DeviceId),
+                            dedicated_mib = desc.DedicatedVideoMemory >> 20,
+                            software,
+                            "DXGI adapter"
+                        );
+                        out.push((
+                            adapter,
+                            crate::vendor::AdapterFact {
+                                index,
+                                vendor: desc.VendorId,
+                                device: desc.DeviceId,
+                                dedicated: desc.DedicatedVideoMemory as u64,
+                                software,
+                                name,
+                            },
+                        ));
+                    }
+                    index += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Mesh shaders and shader model 6.6, which translated mesh shaders need.
+fn runs_title(device: &ID3D12Device) -> bool {
+    let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS7::default();
+    let mut model = D3D12_FEATURE_DATA_SHADER_MODEL { HighestShaderModel: D3D_SHADER_MODEL_6_6 };
+    // SAFETY: each query writes its own structure of the given size.
+    unsafe {
+        device
+            .CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, (&raw mut options).cast(), size_of_val(&options) as u32)
+            .is_ok()
+            && device
+                .CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, (&raw mut model).cast(), size_of_val(&model) as u32)
+                .is_ok()
+            && options.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED
+            && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0
+    }
+}
+
+/// The discrete adapter `VICTORY_GPU` / `VICTORY_D3D12_ADAPTER` name.
+/// Unset, the hardware adapter with the most dedicated memory that can run
+/// the title. `VICTORY_GPU=amd` keeps Radeon cards only, so an RX 9070 XT
+/// wins over a Ryzen iGPU and over an NVIDIA card left in the machine.
+fn open_hardware_device() -> windows::core::Result<(ID3D12Device, IDXGIAdapter3)> {
+    let listed = list_adapters()?;
+    let filter = crate::vendor::gpu_filter(
+        std::env::var("VICTORY_GPU").ok().as_deref(),
+        std::env::var("VICTORY_D3D12_ADAPTER").ok().as_deref(),
+    );
+    let facts: Vec<crate::vendor::AdapterFact> = listed.iter().map(|(_, fact)| fact.clone()).collect();
+    let ranked = crate::vendor::rank_adapters(&filter, &facts);
+    if ranked.is_empty() {
+        tracing::error!("no hardware adapter matched VICTORY_GPU / VICTORY_D3D12_ADAPTER");
+        return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
+    }
+    for fact in ranked {
+        let Some((adapter, _)) = listed.iter().find(|(_, listed_fact)| listed_fact.index == fact.index) else {
+            continue;
+        };
+        let mut device: Option<ID3D12Device> = None;
+        // SAFETY: the adapter is a live DXGI adapter.
+        let created = unsafe { D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, &mut device) };
+        match (created, device) {
+            (Ok(()), Some(device)) if runs_title(&device) => {
+                tracing::info!(
+                    name = %fact.name,
+                    vendor = format_args!("{:#06x}", fact.vendor),
+                    device_id = format_args!("{:#06x}", fact.device),
+                    dedicated_mib = fact.dedicated >> 20,
+                    profile = crate::vendor::profile_label(fact.vendor, fact.dedicated),
+                    rdna4 = crate::vendor::rdna4(fact.vendor, fact.device, &fact.name),
+                    "host adapter"
+                );
+                victory_shader::emit::set_host_rdna4(crate::vendor::rdna4(fact.vendor, fact.device, &fact.name));
+                return Ok((device, adapter.cast()?));
+            }
+            (Ok(()), Some(_)) => {
+                tracing::info!(name = %fact.name, "skipping adapter: no mesh shaders or no shader model 6.6");
+            }
+            (Err(e), _) => {
+                tracing::info!(name = %fact.name, error = %e, "D3D12CreateDevice failed");
+            }
+            (Ok(()), None) => {
+                tracing::info!(name = %fact.name, "D3D12CreateDevice returned no device");
+            }
+        }
+    }
+    tracing::error!("no adapter can run the title (mesh shaders and shader model 6.6 are required)");
+    Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))
+}
+
+/// One 64 KiB buffer. Some drivers refuse `CREATE_NOT_RESIDENT`; the rest of
+/// the run then allocates resident memory instead of failing every upload.
+fn allow_not_resident(device: &ID3D12Device) {
+    let mut made: Option<ID3D12Resource> = None;
+    // SAFETY: a throwaway committed buffer, dropped at the end of the probe.
+    let created = unsafe {
+        device.CreateCommittedResource(
+            &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+            D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT,
+            &D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                Width: 65536,
+                Height: 1,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                ..Default::default()
+            },
+            D3D12_RESOURCE_STATE_COMMON,
+            None,
+            &mut made,
+        )
+    };
+    match created {
+        Ok(()) => tracing::info!("CREATE_NOT_RESIDENT is accepted"),
+        Err(e) => {
+            NOT_RESIDENT_OK.store(false, Ordering::Relaxed);
+            tracing::warn!(error = %e, "this driver refused CREATE_NOT_RESIDENT; new memory is resident at creation");
+        }
+    }
+}
+
 fn create() -> windows::core::Result<Host> {
     // SAFETY: plain D3D12 object creation with valid descriptions.
     unsafe {
@@ -892,6 +1052,7 @@ fn create() -> windows::core::Result<Host> {
             }
         }
         let mut device: Option<ID3D12Device> = None;
+        let mut picked_adapter: Option<IDXGIAdapter3> = None;
         // Diagnostics: the software adapter, on which a shader's wild access
         // is an access violation in this process (a crash report with the
         // address and instruction) instead of a GPU fault and driver reset.
@@ -900,7 +1061,9 @@ fn create() -> windows::core::Result<Host> {
             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
             tracing::info!("host device on the software adapter (WARP)");
         } else {
-            D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+            let (opened, adapter3) = open_hardware_device()?;
+            device = Some(opened);
+            picked_adapter = Some(adapter3);
             // Whether a GPU hang ends the run or freezes the PC (#1054).
             crate::tdr::log();
         }
@@ -936,10 +1099,17 @@ fn create() -> windows::core::Result<Host> {
         {
             tracing::info!(min = o1.WaveLaneCountMin, max = o1.WaveLaneCountMax, "host wave lanes");
             victory_shader::emit::set_host_max_wave(o1.WaveLaneCountMax);
-            // (RDNA has waves of 32 and 64, the vendor's older cards of 64 alone.)
+            // RDNA2, RDNA3 and RDNA4 (RX 9070 XT) advertise 32 to 64 lanes.
+            // A driver that only reports 32 still uses RDNA float rules.
+            // GCN is 64 only (`min` 64) and is not selected: it has no mesh shaders.
             let amd = crate::indirect::amd(&device);
-            victory_shader::emit::set_host_rdna(amd && o1.WaveLaneCountMin == 32 && o1.WaveLaneCountMax == 64);
+            let rdna = amd && o1.WaveLaneCountMin <= 32 && o1.WaveLaneCountMax >= 32;
+            victory_shader::emit::set_host_rdna(rdna);
+            if rdna {
+                tracing::info!("RDNA float rules on (RX 9070 XT and the other RDNA cards)");
+            }
         }
+        allow_not_resident(&device);
         let messages = debug
             .then(|| device.cast::<ID3D12InfoQueue>().ok())
             .flatten();
@@ -963,9 +1133,13 @@ fn create() -> windows::core::Result<Host> {
                 ..Default::default()
             })?;
         let dsv_size = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-        let adapter = CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
-            .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
-            .ok();
+        let adapter = if picked_adapter.is_some() {
+            picked_adapter
+        } else {
+            CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
+                .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
+                .ok()
+        };
         tracing::info!("host D3D12 device ready");
         Ok(Host {
             device,
@@ -2607,7 +2781,11 @@ mod relay_tests {
 fn late_most() -> usize {
     static MOST: OnceLock<usize> = OnceLock::new();
     *MOST.get_or_init(|| {
-        std::env::var("VICTORY_LATE_WAIT_LISTS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(256).max(1)
+        std::env::var("VICTORY_LATE_WAIT_LISTS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or_else(|| crate::residency::host_ram().late_lists)
+            .max(1)
     })
 }
 
@@ -9405,6 +9583,7 @@ impl Host {
             );
             self.log_video_memory("right after that change");
         }
+        crate::residency::note_vram(own.Budget, own.CurrentUsage);
         Some([own.Budget, own.CurrentUsage, shared.Budget, shared.CurrentUsage])
     }
 
