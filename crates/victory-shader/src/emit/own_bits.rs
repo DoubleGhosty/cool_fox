@@ -673,7 +673,7 @@ impl Ctx<'_> {
                     || name.starts_with("v_mbcnt")
                     || name.contains("lane")
                     || matches!(&inst.fields, Fields::Valu(v) if v.dpp.is_some())
-                    || super::lower::reads_mask_as_data(st, inst)
+                    || super::lower::reads_mask_as_data(st, b, inst)
                     || self.sections[b].iter().any(|(&s, sec)| i >= s && i <= sec.end);
                 if cross {
                     return Err((self.at(u), CROSS));

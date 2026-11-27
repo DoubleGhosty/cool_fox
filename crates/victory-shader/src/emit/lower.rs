@@ -1557,10 +1557,13 @@ thread_local! {
     pub(super) static TEST_HOST_WAVE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
 }
 
-pub(super) fn reads_mask_as_data(st: &Structured, i: &Inst) -> bool {
+pub(super) fn reads_mask_as_data(st: &Structured, b: usize, i: &Inst) -> bool {
     // A scalar select or branch uses the condition of the whole guest wave,
     // even when the preceding mask operation has no scalar-dword consumers.
-    if matches!(i.fields, Fields::Sop { .. } | Fields::Sopp { .. } | Fields::Valu(_))
+    if matches!(i.fields, Fields::Sopp { .. }) {
+        return st.wave_scc.contains(&b) && matches!(i.name(), "s_cbranch_scc0" | "s_cbranch_scc1");
+    }
+    if matches!(i.fields, Fields::Sop { .. } | Fields::Valu(_))
         && i.read(Reg::Scc).is_some_and(|s| st.scc_some.contains_key(&s))
     {
         return true;
@@ -1771,8 +1774,10 @@ impl<'a> Lower<'a> {
         let mut s = Shader::new(x.native.stage == HwStage::Ps);
         s.inputs = x.inputs.clone();
         s.outputs = x.outputs.clone();
-        let insts = || p.blocks.iter().flat_map(|b| &b.insts);
-        let writes_uavs = insts().any(|i| {
+        let insts = || p.blocks.iter().enumerate().flat_map(|(b, block)| {
+            block.insts.iter().map(move |i| (b, i))
+        });
+        let writes_uavs = insts().any(|(_, i)| {
             matches!(i.fields, Fields::Image { .. } | Fields::Buffer { .. })
                 && (i.name().contains("store") || i.name().contains("atomic"))
         });
@@ -1792,7 +1797,7 @@ impl<'a> Lower<'a> {
             // Code reading other lanes needs the console's wave size and
             // lane order; so do lane masks read as numbers, and LDS shared
             // within one wave, where the console compiler leaves out barriers.
-            console_lanes = insts().any(|i| {
+            console_lanes = insts().any(|(b, i)| {
                 let n = i.name();
                 n.starts_with("ds_swizzle")
                     || n.contains("permute")
@@ -1800,7 +1805,7 @@ impl<'a> Lower<'a> {
                     || n.starts_with("v_mbcnt")
                     || matches!(n, "v_readlane_b32" | "v_writelane_b32")
                     || matches!(&i.fields, Fields::Valu(v) if v.dpp.is_some())
-                    || reads_mask_as_data(x.st, i)
+                    || reads_mask_as_data(x.st, b, i)
             }) || lane_constant_masks(x.st)
                 // (a branch the wave takes together asks the wave)
                 || !x.st.wide.is_empty();
@@ -1816,13 +1821,13 @@ impl<'a> Lower<'a> {
             // masks), nor when LDS may be shared within the console wave without barriers (a
             // group over 32 threads with LDS): those still need 64-lane waves.
             if wave == 64 && host_max_wave() == 32 && (console_lanes || one_wave && s.lds_dwords > 0) {
-                let crosses = insts().any(|i| {
+                let crosses = insts().any(|(b, i)| {
                     let n = i.name();
                     n.starts_with("v_mbcnt")
                         || matches!(n, "v_readlane_b32" | "v_writelane_b32")
                         || n.starts_with("ds_permute")
                         || n.starts_with("ds_bpermute")
-                        || reads_mask_as_data(x.st, i)
+                        || reads_mask_as_data(x.st, b, i)
                 }) || lane_constant_masks(x.st)
                     || !x.st.wide.is_empty();
                 if !crosses && (s.lds_dwords == 0 || group <= 32) {
@@ -1873,7 +1878,7 @@ impl<'a> Lower<'a> {
                 // `VICTORY_WAVE_WHY=1`: why a program keeps 64-lane waves (one line per reason)
                 if wave == 64 && std::env::var_os("VICTORY_WAVE_WHY").is_some() {
                     let mut why: Vec<&str> = Vec::new();
-                    for i in insts() {
+                    for (b, i) in insts() {
                         let n = i.name();
                         let r = if n.starts_with("v_mbcnt") {
                             "v_mbcnt"
@@ -1883,7 +1888,7 @@ impl<'a> Lower<'a> {
                             "v_writelane"
                         } else if n.starts_with("ds_permute") || n.starts_with("ds_bpermute") {
                             "ds_(b)permute"
-                        } else if reads_mask_as_data(x.st, i) {
+                        } else if reads_mask_as_data(x.st, b, i) {
                             "mask as data"
                         } else {
                             continue;
@@ -1948,7 +1953,7 @@ impl<'a> Lower<'a> {
         // do not run, and all of them in a program with a loop closed by a
         // plain jump (a lane still in it at the iteration limit leaves the
         // program there, `abort_block`).
-        let fence_only: HashSet<usize> = if insts().any(|i| i.name() == "s_barrier") {
+        let fence_only: HashSet<usize> = if insts().any(|(_, i)| i.name() == "s_barrier") {
             let order = crate::ir::reverse_postorder(&p.blocks);
             let mut place = vec![usize::MAX; p.blocks.len()];
             for (n, &b) in order.iter().enumerate() {
@@ -4958,10 +4963,13 @@ impl<'a> Lower<'a> {
     fn wave_wide(&mut self, b: usize, when: Bool) -> Result<V, Why> {
         const WHY: Why = WAVE_WIDE_ELSEWHERE;
         let any = self.x.st.wave_any.get(b).copied().flatten().ok_or("a wave-wide branch on a scalar condition")?;
-        if self.exchange.is_none() && self.halves.is_none() && self.console_lanes && self.mask_data == MaskData::Console {
-            // The host's waves are the console's: the wave's own answer. The lanes that are
-            // elsewhere have no bit set, as on the console, so "some lane" needs no one but
-            // the lanes here, and "every lane's bit is clear" is true of the others anyway.
+        let single_half = self.exchange.as_ref().is_some_and(|e| e.1);
+        let native_wave = self.exchange.is_none() && self.halves.is_none()
+            && self.console_lanes && self.mask_data == MaskData::Console;
+        if native_wave || single_half || self.local && self.local_any {
+            // One vote covers every participating lane when the wave sizes
+            // match or only one half of a console wave has threads. The final
+            // approximate fallback explicitly gives each half an independent vote.
             let c = self.cur;
             let mine = self.boolean(when, c)?;
             let i1t = self.s.t.i1;
@@ -13322,7 +13330,9 @@ impl<'a> Lower<'a> {
             } => {
                 // A negated condition branches the other way round.
                 let (cond, taken, not_taken) = match self.x.st.bools.node(when) {
-                    _ if self.x.st.wide.contains(&b) || self.x.st.wave_scc.contains(&b) => {
+                    // Only compute maps host lanes to console lanes. Graphics
+                    // stages keep the per-lane predicate and its EXEC guards.
+                    _ if self.x.st.wide.contains(&b) || self.console_lanes && self.x.st.wave_scc.contains(&b) => {
                         let c = self.wave_wide(b, when).map_err(|w| unsupported(offset, w))?;
                         (c, taken, not_taken)
                     }

@@ -440,7 +440,7 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
     let p = crate::spill::build(&native)?;
     // Structurisation first: tracing per-lane descriptors needs it (its
     // failure is reported after the earlier stages').
-    let st = structure::structure(&p);
+    let st = structure::for_stage(&p, native.stage);
     let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok())?;
     let io = io::raise(&p, &native)?;
     let st = st?;
@@ -518,7 +518,8 @@ pub fn emit(
     io: &io::Io,
     res: &resource::Resources,
 ) -> Result<HostShader, ShaderError> {
-    let exact = emit_forms(c, native, p, st, io, res);
+    let try_lane_split = !st.wave_scc.is_empty();
+    let exact = emit_forms(c, native, p, st, io, res, !try_lane_split);
     // A branch on a mask operation's SCC is the wave's ([`structure::Structured::wave_scc`],
     // #66) and needs every lane where it stands. A program none of whose forms gives it that
     // is taken with those branches split per lane, as before #66: inexact where an arm runs
@@ -528,13 +529,13 @@ pub fn emit(
     // `VICTORY_LANE_SPLIT=exact` refuses such a program instead.
     let refused_wide = matches!(&exact,
         Err(ShaderError::Unsupported { what, .. }) if *what == lower::WAVE_WIDE_ELSEWHERE);
-    if !refused_wide || st.wave_scc.is_empty() || std::env::var_os("VICTORY_LANE_SPLIT").is_some_and(|v| v == "exact") {
+    if !try_lane_split || !refused_wide || std::env::var_os("VICTORY_LANE_SPLIT").is_some_and(|v| v == "exact") {
         return exact;
     }
     let again = structure::with_per_lane(|| {
-        let st = structure::structure(p)?;
+        let st = structure::for_stage(p, native.stage)?;
         let res = resource::track(p, &native.layout, native.stage, Some(&st))?;
-        emit_forms(c, native, p, &st, io, &res)
+        emit_forms(c, native, p, &st, io, &res, true)
     });
     if std::env::var_os("VICTORY_WAVE_WHY").is_some() {
         match &again {
@@ -542,8 +543,12 @@ pub fn emit(
             Err(e) => wave_why!("WAVE64-RETRY branches on a mask's SCC split per lane: {e}"),
         }
     }
-    // the exact form's refusal says more than the inexact one's
-    if again.is_err() { exact } else { again }
+    if again.is_ok() {
+        return again;
+    }
+    // If the lane split fails too, try the original program's approximate
+    // local-wave forms as a last resort.
+    emit_forms(c, native, p, st, io, res, true).or(exact)
 }
 
 fn emit_forms(
@@ -553,6 +558,7 @@ fn emit_forms(
     st: &structure::Structured,
     io: &io::Io,
     res: &resource::Resources,
+    allow_approximate: bool,
 ) -> Result<HostShader, ShaderError> {
     // (what an earlier program's lowering on this thread left behind)
     lower::take_needs();
@@ -626,7 +632,7 @@ fn emit_forms(
                 }
                 return None;
             };
-            let st = match structure::structure(&p) {
+            let st = match structure::for_stage(&p, native.stage) {
                 Ok(st) => st,
                 Err(e) => {
                     if why {
@@ -762,7 +768,7 @@ fn emit_forms(
                 continue;
             }
             for (name, f) in &forms {
-                if let Some((p, st, io, res)) = f
+                if (exact || allow_approximate) && let Some((p, st, io, res)) = f
                     && idiom(p, st) == exact
                 {
                     let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
@@ -780,7 +786,7 @@ fn emit_forms(
                 }
             }
         }
-        if local_on && !exact_only {
+        if allow_approximate && local_on && !exact_only {
             // Last: every mask and lane read per host wave.
             if !strict {
                 for (name, f) in &forms {
@@ -836,7 +842,7 @@ fn emit_forms(
         return original;
     }
     let p = ir::thread_edges(p, &edges)?;
-    let st = structure::structure(&p)?;
+    let st = structure::for_stage(&p, native.stage)?;
     let io = io::raise(&p, native)?;
     let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
     emit_program(c, native, &p, &st, &io, &res).and_then(supported)
@@ -948,6 +954,21 @@ fn widen(
     }
 }
 
+/// In both scene histogram kernels, a lane leaves the sample loop once its
+/// last pixel has been counted. SCC tests the remaining-lanes mask, and the
+/// fallthrough immediately restricts EXEC to that mask. Each lane contributes
+/// independent atomic additions and all lanes rejoin before the group barrier.
+/// The existing per-lane exit therefore works across two host waves of 32.
+fn histogram_loop_exit(c: &Container, p: &ir::Program) -> Option<usize> {
+    let offset = match u128::from_be_bytes(c.digest) {
+        0x6d0f7c4a_4b76b006_9d94a41c_1461e9b7 => 0x19c, // ComputeSceneHistogramCS
+        0xb8d2f51f_aec434e3_fcc84124_4de3238d => 0x1ec, // ComputeSceneHistogramDepthWeightedCS
+        _ => return None,
+    };
+    p.blocks.iter().position(|b| b.insts.last()
+        .is_some_and(|i| i.machine.offset == offset && i.name() == "s_cbranch_scc0"))
+}
+
 /// The translated program, and the wave size it requires of the host.
 fn emit_program(
     c: &Container,
@@ -1020,10 +1041,18 @@ fn emit_program(
         }
         _ => 0,
     };
+    let mut st = std::borrow::Cow::Borrowed(st);
+    if native.wave64 && lower::host_max_wave() == 32
+        && !st.wave_scc.is_empty()
+        && let Some(block) = histogram_loop_exit(c, p)
+        && st.wave_scc.contains(&block)
+    {
+        st.to_mut().wave_scc.remove(&block);
+    }
     let l = lower::lower(&lower::Parts {
         native,
         p,
-        st,
+        st: &st,
         io,
         res,
         inputs,

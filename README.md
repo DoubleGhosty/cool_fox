@@ -100,6 +100,7 @@ For 4 GB VRAM GPUs or low-memory systems:
 | Launcher | Target | Renderer Ports | Notes |
 |---|---|---|---|
 | `Play-VIctory.cmd` | NVIDIA + AMD, 8 GB+ | 6, 7 on; 1, 5 opt-in | Safe default for all GPUs |
+| `Play-VIctory-NVIDIA.cmd` | NVIDIA GeForce | 6, 7 on by default | 1080p 3D scene with a 4K interface, displayed in a window up to 1920×1080 |
 | `Play-VIctory-AMD.cmd` | AMD 16 GB+ | 1, 5, 6, 7 all on | Maximum performance; all ports from top community forks |
 | `Play-VIctory-4GB.cmd` | 4 GB VRAM | 6, 7 on; 1, 5 off | Series S profile, reduced card buffers |
 | `scripts\play.ps1` | Diagnostics | 6, 7 on; `-Safe` disables | Full logging; `-RayTracing` for RT |

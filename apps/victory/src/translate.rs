@@ -557,7 +557,7 @@ fn translate_programs(container: &Container, programs: Vec<NativeProgram>, examp
                 t.instructions += program.blocks.iter().map(|b| b.insts.len()).sum::<usize>();
                 // Per-lane descriptors are traced on the per-lane form; its
                 // failure is listed after the resources' and I/O's.
-                let structured = structure::structure(&program);
+                let structured = structure::for_stage(&program, p.stage);
                 let lanes = structured.as_ref().ok();
                 let res = match resource::track(&program, &p.layout, p.stage, lanes) {
                     Ok(r) => {
