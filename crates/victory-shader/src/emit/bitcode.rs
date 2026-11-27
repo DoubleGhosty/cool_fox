@@ -412,7 +412,8 @@ impl Module {
         }
     }
 
-    fn follow(&self, mut block: usize) -> usize {
+    /// The block that holds what is aimed at `block` now (itself unless a meet closed it).
+    pub(crate) fn follow(&self, mut block: usize) -> usize {
         for _ in 0..64 {
             match self.redirect.get(&block) {
                 Some(&next) if next != block => block = next,
@@ -425,6 +426,33 @@ impl Module {
     /// Instructions aimed at `from` after this belong in `to` (a meet closed `from`).
     pub fn continues(&mut self, from: usize, to: usize) {
         self.redirect.insert(from, to);
+    }
+
+    /// The terminator of the block that holds what is aimed at `block`, taken off it.
+    pub(crate) fn take_term(&mut self, block: usize) -> Option<Term> {
+        let block = self.follow(block);
+        self.blocks[block].term.take()
+    }
+
+    /// A join's value from a block a meet closed comes from its continuation: the closed
+    /// block branches into the meet, and the continuation holds the branch that leaves.
+    pub(crate) fn settle_meets(&mut self) {
+        if self.redirect.is_empty() {
+            return;
+        }
+        for b in 0..self.blocks.len() {
+            for n in 0..self.blocks[b].phis.len() {
+                let p = self.blocks[b].phis[n] as usize;
+                let Op::Phi(incoming) = &self.insts[p].op else {
+                    continue;
+                };
+                if incoming.iter().all(|&(_, from)| self.follow(from) == from) {
+                    continue;
+                }
+                let settled = incoming.iter().map(|&(v, from)| (v, self.follow(from))).collect();
+                self.insts[p].op = Op::Phi(settled);
+            }
+        }
     }
 
     fn push(&mut self, block: usize, ty: Ty, op: Op) -> V {
@@ -527,7 +555,17 @@ impl Module {
         self.blocks[block].term.is_some()
     }
 
+    /// A terminator aimed at a block a meet closed belongs in its
+    /// continuation, as instructions do ([`Module::continues`]): the closed
+    /// block already branches into the meet, and replacing that branch left
+    /// the meet's blocks (and the values made there) unreached.
     pub fn terminate(&mut self, block: usize, t: Term) {
+        let block = self.follow(block);
+        if let Some(old) = self.blocks[block].term
+            && std::env::var_os("VICTORY_OPT_CHECK").is_some()
+        {
+            eprintln!("VICTORY_OPT_CHECK: block {block}: terminator {old:?} replaced by {t:?}");
+        }
         self.blocks[block].term = Some(t);
     }
 
@@ -654,6 +692,78 @@ impl Module {
                 self.set_phi(joined, back);
                 rest.push((joined, latch));
                 self.insts[id as usize].op = Op::Phi(rest);
+            }
+        }
+        self.single_back_edges();
+    }
+
+    /// Gives every block one back edge at most, as DXC's code has: a block
+    /// that closes two loops at once (an inner one and one around it) sends
+    /// the way to every header but the innermost through a block of its own,
+    /// which becomes that loop's latch (and is not folded back, below).
+    /// vkd3d-proton's DXIL conversion keeps one back edge per block, takes
+    /// the other for a forward edge and then recurses without end over the
+    /// cycle that makes: on `CS_Prop_BatchNoCull` a 4 GiB stack overflowed,
+    /// its dispatch was dropped and the title ended the run 30 s later with
+    /// its write to 0 at +0x23cf683 (#39).
+    fn single_back_edges(&mut self) {
+        let n = self.blocks.len();
+        if n == 0 {
+            return;
+        }
+        // Depth-first from the entry, as above; a header found later is
+        // nested deeper.
+        let mut state = vec![0u8; n];
+        let mut found = vec![0usize; n];
+        let mut stack = vec![(0usize, 0usize)];
+        state[0] = 1;
+        let mut back: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut next = 1;
+        while let Some(top) = stack.last_mut() {
+            let (b, k) = *top;
+            let succ = self.successors(b);
+            if k < succ.len() {
+                top.1 += 1;
+                let t = succ[k];
+                match state[t] {
+                    0 => {
+                        state[t] = 1;
+                        found[t] = next;
+                        next += 1;
+                        stack.push((t, 0));
+                    }
+                    1 => back.entry(b).or_default().push(t),
+                    _ => {}
+                }
+            } else {
+                state[b] = 2;
+                stack.pop();
+            }
+        }
+        for (b, mut headers) in back {
+            headers.sort_unstable();
+            headers.dedup();
+            if headers.len() < 2 {
+                continue;
+            }
+            let innermost = headers.iter().copied().max_by_key(|&h| found[h]).expect("two headers");
+            for header in headers.into_iter().filter(|&h| h != innermost) {
+                let latch = self.new_block();
+                let to = |t: usize| if t == header { latch } else { t };
+                self.blocks[b].term = match self.blocks[b].term {
+                    Some(Term::Br(t)) => Some(Term::Br(to(t))),
+                    Some(Term::CondBr(c, t, f)) => Some(Term::CondBr(c, to(t), to(f))),
+                    other => other,
+                };
+                self.blocks[latch].term = Some(Term::Br(header));
+                // What came from `b` comes through the new block, as it was.
+                for id in self.blocks[header].phis.clone() {
+                    let Op::Phi(incoming) = self.insts[id as usize].op.clone() else {
+                        continue;
+                    };
+                    let incoming = incoming.into_iter().map(|(v, p)| (v, if p == b { latch } else { p })).collect();
+                    self.insts[id as usize].op = Op::Phi(incoming);
+                }
             }
         }
     }
@@ -826,6 +936,9 @@ impl Module {
         // An empty latch (only a branch back to its loop header) is folded
         // into its one predecessor, so the exiting block is the latch as in
         // DXC's loops; the AMD driver hangs on divergent loops otherwise.
+        // Not into one that is the latch of another loop already: that
+        // block would have two back edges, which `single_back_edges` took
+        // apart for vkd3d-proton's dxil-spirv.
         let mut preds = vec![Vec::new(); self.blocks.len()];
         for &b in &post {
             for &s in succs(b).iter() {
@@ -841,6 +954,7 @@ impl Module {
                 &preds[b][..],
             ) && pos[h] < pos[b]
                 && !succs(*p).contains(&h)
+                && !succs(*p).iter().any(|&s| s != b && pos[s] <= pos[*p])
             {
                 fold[b] = Some((*p, h));
             }
@@ -874,10 +988,21 @@ impl Module {
                 V::Inst(i) => {
                     let id = ids[i as usize];
                     if id == u32::MAX {
-                        funcs.saturating_sub(1)
-                    } else {
-                        id
+                        let inst = &self.insts[i as usize];
+                        let home = self.blocks.iter().position(|b| {
+                            b.phis.contains(&i) || b.body.contains(&i)
+                        });
+                        panic!(
+                            "use of a void value: inst {i} void={} live={} block={home:?} \
+                             laid_out={:?} folded={:?} op={:?}",
+                            self.is_void(inst.ty),
+                            live[i as usize],
+                            home.map(|b| pos[b] != u64::MAX),
+                            home.map(|b| fold[b].is_some()),
+                            inst.op,
+                        );
                     }
+                    id
                 }
             }
         };
@@ -968,8 +1093,15 @@ impl Module {
                         r.clear();
                         r.push(u64::from(inst.ty.0));
                         for &(v, b) in incoming {
+                            // An incoming from a block no branch reaches: that
+                            // block is not written (nor are its values), so it
+                            // is no predecessor here.
+                            let pred = from(b);
+                            if pred == u64::MAX {
+                                continue;
+                            }
                             r.push(signed(i64::from(inst_id) - i64::from(abs(v))));
-                            r.push(from(b));
+                            r.push(pred);
                         }
                         w.record(16, &r);
                     }
@@ -1312,6 +1444,73 @@ mod tests {
     }
 
     #[test]
+    fn phi_incoming_from_an_unreachable_block_is_dropped() {
+        // A block no branch reaches is not written, so a value made there
+        // has no id; a phi's incoming from it must be left out, not written
+        // (it panicked with "use of a void value").
+        let build = |with_dead: bool| {
+            let mut m = Module::default();
+            let i32t = m.int(32);
+            let (entry, dead, join) = (m.new_block(), m.new_block(), m.new_block());
+            let (a, b) = (m.i32(1), m.i32(2));
+            m.terminate(entry, Term::Br(join));
+            let x = m.bin(dead, Bin::Add, a, b);
+            m.terminate(dead, Term::Br(join));
+            let p = m.phi(join, i32t);
+            let mut incoming = vec![(a, entry)];
+            if with_dead {
+                incoming.push((x, dead));
+            }
+            m.set_phi(p, incoming);
+            let _ = m.bin(join, Bin::Add, p, b);
+            m.terminate(join, Term::Ret);
+            m
+        };
+        assert_eq!(build(true).write(), build(false).write());
+    }
+
+    #[test]
+    fn a_meet_in_a_block_that_branched_on_keeps_its_branch() {
+        // `entry` branches to `next` before a value made in it is asked across
+        // the halves: the meet that splits `entry` must move that branch to its
+        // continuation, and `next`'s join must name the continuation.
+        let mut m = Module::default();
+        let i32t = m.int(32);
+        let (entry, next) = (m.new_block(), m.new_block());
+        let (a, b) = (m.i32(1), m.i32(2));
+        let x = m.bin(entry, Bin::Add, a, b);
+        m.terminate(entry, Term::Br(next));
+        let p = m.phi(next, i32t);
+        m.set_phi(p, vec![(x, entry)]);
+        let _ = m.bin(next, Bin::Add, p, b);
+        m.terminate(next, Term::Ret);
+        // The meet, as `half_meet_at` builds it: a wait block, then the continuation.
+        let left = m.take_term(entry);
+        assert!(matches!(left, Some(Term::Br(t)) if t == next));
+        let (wait, after) = (m.new_block(), m.new_block());
+        m.terminate(entry, Term::Br(wait));
+        m.terminate(wait, Term::Br(after));
+        m.continues(entry, after);
+        m.terminate(after, left.unwrap());
+        let y = m.bin(entry, Bin::Add, x, b); // aimed at `entry`: goes to `after`
+        assert_eq!(m.follow(entry), after);
+        let V::Inst(yi) = y else { unreachable!() };
+        assert!(m.blocks[after].body.contains(&yi));
+        m.settle_meets();
+        let Op::Phi(incoming) = &m.insts[match p {
+            V::Inst(i) => i as usize,
+            _ => unreachable!(),
+        }]
+        .op
+        else {
+            unreachable!()
+        };
+        assert_eq!(incoming, &vec![(x, after)]);
+        assert!(m.reached().iter().all(|&r| r));
+        assert!(!m.write().is_empty());
+    }
+
+    #[test]
     fn empty_latch_with_dead_phis_is_folded() {
         // Two identical loops except one has an unread phi in its empty latch;
         // both must fold the latch and emit identical bitcode.
@@ -1390,6 +1589,46 @@ mod tests {
                 fnv(&bytes)
             );
         }
+    }
+
+    /// A block that closes two loops at once (an inner one and the one
+    /// around it) keeps the inner back edge and sends the outer one through a
+    /// block of its own (vkd3d-proton keeps one back edge per block), which
+    /// the empty-latch folding leaves where it is.
+    #[test]
+    fn a_block_that_closes_two_loops_gets_one_back_edge() {
+        let mut m = Module::default();
+        let i32t = m.int(32);
+        let void = m.void();
+        let main_ty = m.func_ty(void, vec![]);
+        m.function("main", main_ty, None, true);
+        let [entry, outer, inner, latch, exit] = [(); 5].map(|()| m.new_block());
+        let (zero, one, two) = (m.i32(0), m.i32(1), m.i32(2));
+        m.terminate(entry, Term::Br(outer));
+        let po = m.phi(outer, i32t);
+        let d = m.cmp(outer, pred::IULT, po, two);
+        m.terminate(outer, Term::CondBr(d, inner, exit));
+        let pi = m.phi(inner, i32t);
+        m.terminate(inner, Term::Br(latch));
+        let x = m.bin(latch, Bin::Add, pi, one);
+        let c = m.cmp(latch, pred::IULT, x, two);
+        m.terminate(latch, Term::CondBr(c, inner, outer));
+        m.terminate(exit, Term::Ret);
+        m.set_phi(po, vec![(zero, entry), (x, latch)]);
+        m.set_phi(pi, vec![(zero, outer), (x, latch)]);
+        m.single_latches();
+        let new = m.blocks.len() - 1;
+        assert_eq!(m.successors(latch), [inner, new]);
+        assert_eq!(m.successors(new), [outer]);
+        let V::Inst(id) = po else { panic!() };
+        let Op::Phi(incoming) = &m.insts[id as usize].op else { panic!() };
+        assert_eq!(incoming, &[(zero, entry), (x, new)]);
+        // Written with the new block: folded back into the latch, it would
+        // write exactly what the module without it writes.
+        let with = m.write();
+        m.blocks[latch].term = Some(Term::CondBr(c, inner, outer));
+        m.set_phi(po, vec![(zero, entry), (x, latch)]);
+        assert_ne!(with, m.write());
     }
 
     /// A loop header with two back edges gets one, through a new block that

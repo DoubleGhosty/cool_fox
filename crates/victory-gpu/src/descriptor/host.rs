@@ -5426,10 +5426,40 @@ mod tests {
             crate::host::read_into(at.ptr as *const u8, &mut bytes).then_some(bytes)
         };
         heap.raw_at(index, &buffer, 64, 1024);
-        let (slot, beside) = (bytes(heap.cpu(index)), bytes(staged(false, 0).unwrap()));
-        assert_eq!(slot, beside, "copied as it was made");
+        // The same view made in place, in two other slots of the heap. Not
+        // the bytes of the slot beside it: a heap the card does not see may
+        // hold descriptors in another form, which the copy converts (#88: an
+        // NVIDIA driver on Windows, the first 16 bytes addresses). Where the
+        // two made in place differ, a descriptor tells where it is (WARP's
+        // are addresses of the slot's own storage), and bytes say nothing.
+        let direct = [heap.dynamic(1).unwrap(), heap.dynamic(1).unwrap()];
+        let desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_R32_TYPELESS,
+            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_SRV {
+                    FirstElement: 64 / 4,
+                    NumElements: 1024 / 4,
+                    StructureByteStride: 0,
+                    Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+                },
+            },
+        };
+        for at in direct {
+            // SAFETY: a slot of our heap and a live buffer covering the range.
+            unsafe { host.device.CreateShaderResourceView(&buffer, Some(&desc), heap.cpu(at)) };
+        }
+        let slot = bytes(heap.cpu(index));
+        let made = direct.map(|at| bytes(heap.cpu(at)));
+        let comparable = made[0] == made[1];
+        if comparable {
+            assert_eq!(slot, made[0], "copied as it was made");
+        }
         heap.null_raw_at(index);
-        assert_ne!(bytes(heap.cpu(index)), slot, "another view since");
+        if comparable {
+            assert_ne!(bytes(heap.cpu(index)), slot, "another view since");
+        }
         // SAFETY: a plain query.
         assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
     }
