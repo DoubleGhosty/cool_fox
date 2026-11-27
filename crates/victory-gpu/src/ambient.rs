@@ -421,7 +421,8 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float3 found;
     if (constant > 0.0) {
         found = float3(1.0, 0.98, 0.94) * constant * open;
-        light[p] = pack(found);
+        float3 was = unpack(light[p]);
+        light[p] = pack(max(was, found));
         return;
     }
     // Between the four points around, those at its own depth first; which

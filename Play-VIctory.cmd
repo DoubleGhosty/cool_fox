@@ -22,8 +22,8 @@ if not exist "%runner%" (
   exit /b 2
 )
 rem Ambient lighting, crease shading & volumetric air ceiling
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=0.8"
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.0"
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=constant:0.25"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.8"
 if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=1.2,0.8"
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
 rem Memory trimming & VRAM management (prevents 99% RAM stall & NVMe pagefile thrashing)
@@ -70,7 +70,8 @@ if not defined VICTORY_PORT_JOURNAL set "VICTORY_PORT_JOURNAL=1"
 if not defined VICTORY_PORT_CONSTANTS set "VICTORY_PORT_CONSTANTS=0"
 if not defined VICTORY_PORT_CBV set "VICTORY_PORT_CBV=0"
 if not defined VICTORY_LIBRARY_STORE_LATER set "VICTORY_LIBRARY_STORE_LATER=1"
-if not defined VICTORY_PIPELINE_WAIT_MS set "VICTORY_PIPELINE_WAIT_MS=100"
+if not defined VICTORY_PIPELINE_WAIT_MS set "VICTORY_PIPELINE_WAIT_MS=0"
+if not defined VICTORY_SCREEN_WAIT_MS set "VICTORY_SCREEN_WAIT_MS=0"
 if not defined VICTORY_PIPELINE_BOOK set "VICTORY_PIPELINE_BOOK=1"
 if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn"
