@@ -12,47 +12,56 @@ if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
   echo game_scarlett_master.exe not found in VICTORY_GAME_DIR: "%VICTORY_GAME_DIR%" 1>&2
   exit /b 2
 )
-set "runner=%~dp0victory-3d-rtx-pareto-residency.exe"
-if not exist "%runner%" set "runner=%~dp0target\release\victory.exe"
+set "runner=%~dp0target\release\victory.exe"
+if not exist "%runner%" set "runner=%~dp0victory-3d-rtx-pareto-residency.exe"
 if not exist "%runner%" (
   echo Extract the Windows release or run cargo build --release --locked -p victory. 1>&2
   exit /b 2
 )
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.5"
+rem Ambient lighting, crease shading & volumetric air ceiling
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=0.8"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.0"
+if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=1.2,0.8"
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
+rem Memory trimming (prevents 99% RAM stall & NVMe pagefile thrashing)
+if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
+if not defined VICTORY_STAGING_IDLE_MS set "VICTORY_STAGING_IDLE_MS=2000"
+if not defined VICTORY_WINDOW_IDLE_MS set "VICTORY_WINDOW_IDLE_MS=5000"
+if not defined VICTORY_LIST_IDLE_TRIM_S set "VICTORY_LIST_IDLE_TRIM_S=10"
+if not defined VICTORY_READ_KEEP_MB set "VICTORY_READ_KEEP_MB=256"
+if not defined VICTORY_SCRATCH_SPARE_MB set "VICTORY_SCRATCH_SPARE_MB=128"
+if not defined VICTORY_SEND_SPARE_MB set "VICTORY_SEND_SPARE_MB=128"
+rem CPU multi-threaded list translation (tuned for i5-13400F 6 P-cores)
+if not defined VICTORY_THIN set "VICTORY_THIN=1"
+if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=6"
+if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
+if not defined VICTORY_ASYNC_SUBMIT set "VICTORY_ASYNC_SUBMIT=1"
+if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=2"
+if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
+if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=0"
+rem GPU buffer acceleration & pipelined relay
+if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
+if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=1024"
+if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=2"
 if not defined VICTORY_TEXTURE_NO_WAIT set "VICTORY_TEXTURE_NO_WAIT=1"
 if not defined VICTORY_RELAY set "VICTORY_RELAY=2"
+if not defined VICTORY_LATE_WAIT set "VICTORY_LATE_WAIT=3"
 if not defined VICTORY_WIDE_BACK set "VICTORY_WIDE_BACK=1"
 if not defined VICTORY_CARD_REHASH_RUNS set "VICTORY_CARD_REHASH_RUNS=1"
 if not defined VICTORY_JOIN_COPIES set "VICTORY_JOIN_COPIES=1"
 if not defined VICTORY_INDIRECT_WINDOW set "VICTORY_INDIRECT_WINDOW=1"
 if not defined VICTORY_RELAY_COPY set "VICTORY_RELAY_COPY=1"
-if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=2"
 if not defined VICTORY_INDIRECT_BATCH set "VICTORY_INDIRECT_BATCH=2"
 if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
 if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
-rem A constant, not the frame estimate: walking into a bright doorway raised
-rem the estimate and washed the whole frame out. constant:1.0 is even light.
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=constant:0.8"
-rem The write guard misses some titles' writes: skin on a guard's arms and the
-rem phone's frame read garbage (colour noise) until every check hashed the
-rem texture again. Costs some CPU; the frame rate held at 5-7 fps here.
 if not defined VICTORY_TEXTURE_GUARD set "VICTORY_TEXTURE_GUARD=0"
-rem The asynchronous submission paths stay off on NVIDIA: with THIN the head
-rem skin of people in play is not drawn (eyes and teeth are), and JOIN_PARTS
-rem repeats frames of the opening video. Set them to 1 to try instead.
-if not defined VICTORY_THIN set "VICTORY_THIN=0"
-if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=0"
-rem Renderer ports 1 & 5 stay opt-in: on 8 GB NVIDIA cards PORT_CBV=1 can drop
-rem road surfaces and PORT_CONSTANTS+PORT_CBV can raise a C++ exception (#15).
 if not defined VICTORY_PORT_CONSTANTS set "VICTORY_PORT_CONSTANTS=0"
 if not defined VICTORY_PORT_CBV set "VICTORY_PORT_CBV=0"
 if not defined VICTORY_LIBRARY_STORE_LATER set "VICTORY_LIBRARY_STORE_LATER=1"
-if not defined VICTORY_PIPELINE_WAIT_MS set "VICTORY_PIPELINE_WAIT_MS=0"
+if not defined VICTORY_PIPELINE_WAIT_MS set "VICTORY_PIPELINE_WAIT_MS=100"
+if not defined VICTORY_PIPELINE_BOOK set "VICTORY_PIPELINE_BOOK=1"
 if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
-if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
-if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn"
 rem Series X, not S: on an 8 GB card series-s drops the head/skin meshes (faces
 rem render as eyes and teeth only); series-x renders them. Verified 2026-11-26.
