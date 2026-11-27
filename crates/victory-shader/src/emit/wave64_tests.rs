@@ -977,3 +977,412 @@ fn a_parked_pair_another_save_or_restore_shares_stays_two_scalars() {
         assert!(!instructions(&p, "s_mov_b32").is_empty(), "{name}");
     }
 }
+
+/// A mask is produced before a wave-wide branch and read as a number inside it.
+/// The store uses a register written in the body before the deferred ballot.
+fn deferred_ballot(outer_branch: bool) -> Result<HostShader, ShaderError> {
+    let body = [
+        0x340A_0082, // v_lshlrev_b32 v5, 2, v0
+        0x7D88_0000, // v_cmp_gt_u32 vcc, s0, v0
+        0xBE90_046A, // s_mov_b64 s[16:17], vcc
+        0x7D88_0001, // v_cmp_gt_u32 vcc, s1, v0
+        0xBE8C_246A, // s_and_saveexec_b64 s[12:13], vcc
+        0xBF88_0005, // s_cbranch_execz to the restore
+        0x4A08_0001, // v_add_nc_u32 v4, s1, v0
+        0x7E06_0210, // v_mov_b32 v3, s16
+        0x4A06_0903, // v_add_nc_u32 v3, v3, v4
+        0x38 << 26 | 0x1C << 18 | 1 << 12,
+        0x80 << 24 | 2 << 16 | 3 << 8 | 5, // buffer_store_dword v3, v5, s[8:11], 0 offen
+        0xBEFE_040C,                       // s_mov_b64 exec, s[12:13]
+    ];
+    let mut words = Vec::new();
+    if outer_branch {
+        words.extend([
+            0x7D88_0002,                     // v_cmp_gt_u32 vcc, s2, v0
+            0xBE8E_246A,                     // s_and_saveexec_b64 s[14:15], vcc
+            0xBF88_0000 | body.len() as u32, // s_cbranch_execz to the outer restore
+        ]);
+    }
+    words.extend(body);
+    if outer_branch {
+        words.push(0xBEFE_040E); // s_mov_b64 exec, s[14:15]
+    }
+    let native = native_of(&words, true, 128);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let wide = p
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.insts.iter().any(|i| i.name() == "s_cbranch_execz"))
+        .map(|(b, _)| b)
+        .collect();
+    lower::with_half_meets(|| lowered(&native, &p, &wide))
+}
+
+#[test]
+fn a_mask_ballot_in_a_uniform_predecessor_keeps_its_branch() {
+    let mut shader = deferred_ballot(false).expect("uniform mask definition");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        v.validate(&mut shader.dxil)
+            .expect("valid DXIL for the saved mask");
+    }
+}
+
+#[test]
+fn a_deferred_ballot_in_a_wave_only_predecessor_is_refused() {
+    let Err(ShaderError::Unsupported { what, .. }) = deferred_ballot(true) else {
+        panic!("a closed predecessor reached by only part of the group needs a per-wave meet");
+    };
+    assert_eq!(
+        what,
+        "a deferred exchange needs a per-wave meet in a closed block"
+    );
+}
+
+#[test]
+fn a_saved_mask_reaches_each_active_lane() {
+    use windows::Win32::Graphics::Direct3D12::*;
+    use windows::Win32::Graphics::Dxgi::*;
+
+    let shader = deferred_ballot(false).expect("uniform mask definition");
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 device; 0 lane comparisons");
+        return;
+    };
+    let mut caps = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+    // SAFETY: the LUID is the selected device's and caps is the OPTIONS1 output.
+    let adapter = unsafe {
+        host.device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS1,
+                (&raw mut caps).cast(),
+                size_of_val(&caps) as u32,
+            )
+            .expect("wave capabilities");
+        CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
+            .and_then(|f| f.EnumAdapterByLuid::<IDXGIAdapter1>(host.device.GetAdapterLuid()))
+            .and_then(|a| a.GetDesc1())
+            .expect("selected adapter")
+            .Description
+    };
+    let name = String::from_utf16_lossy(
+        &adapter[..adapter
+            .iter()
+            .position(|&w| w == 0)
+            .unwrap_or(adapter.len())],
+    );
+    if !caps.WaveOps.as_bool() || !(caps.WaveLaneCountMin..=caps.WaveLaneCountMax).contains(&32) {
+        eprintln!(
+            "{name}: Wave{}..{}, 0 Wave32 lane comparisons",
+            caps.WaveLaneCountMin, caps.WaveLaneCountMax
+        );
+        return;
+    }
+    let (root, pso) = host
+        .compute_pipeline(&shader)
+        .expect("Wave32 compute pipeline");
+    assert_eq!(shader.root_uavs, [super::SLOT_MEET]);
+    assert!(shader.root_cbvs.is_empty() && shader.root_srvs.is_empty());
+    let mut comparisons = 0;
+    for (mask_limit, active_limit) in [(0u32, 0u32), (5, 23), (20, 64), (68, 87), (96, 128)] {
+        let constants = [mask_limit, active_limit];
+        let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+        for u in &shader.user_data {
+            if let (RootType::Constants, 0, d @ 0..=1) = (u.root, u.slot, u.dword) {
+                ud[u.index as usize] = constants[d as usize];
+            }
+        }
+        let output = host
+            .dispatch(
+                &root,
+                &pso,
+                &Dispatch {
+                    roots: vec![(0, Root::Constants(ud)), (1, Root::Uav(1))],
+                    views: &[View::RawUav(128), View::RawUav(3)],
+                    samplers: &[],
+                    groups: [1, 1, 1],
+                },
+            )
+            .expect("128-thread dispatch");
+        let expected: Vec<u32> = (0..128)
+            .map(|thread| {
+                let low_lanes = mask_limit.saturating_sub(thread / 64 * 64).min(32);
+                let low_mask = ((1u64 << low_lanes) - 1) as u32;
+                if thread < active_limit {
+                    low_mask.wrapping_add(thread + active_limit)
+                } else {
+                    0
+                }
+            })
+            .collect();
+        assert_eq!(
+            output[1], [0; 3],
+            "all exchanges are in the uniform predecessor"
+        );
+        assert_eq!(
+            output[0], expected,
+            "{name}, mask<{mask_limit}, active<{active_limit}"
+        );
+        comparisons += expected.len();
+    }
+    eprintln!("{name}: {comparisons} Wave32 lane comparisons passed");
+}
+
+const MASK_SCC_CASES: [(u32, u32); 9] = [
+    (0, 0),
+    (1, 0),
+    (32, 31),
+    (32, 32),
+    (48, 7),
+    (48, 37),
+    (48, 49),
+    (64, 63),
+    (64, 64),
+];
+
+/// With two host waves for one console wave, one active lane is enough to set SCC
+/// for all lanes still in EXEC. For example, with 48 active lanes and lane 37
+/// selected, all 48 store 2; with lane 49 selected they all store 1.
+#[derive(Clone, Copy, Debug)]
+enum SccUse {
+    Combined,
+    Branch,
+    Select,
+}
+
+fn nested_mask_scc(which: SccUse) -> NativeProgram {
+    let choice: &[u32] = match which {
+        SccUse::Combined => &[
+            0x8506_8182, // s_cselect_b32 s6, 2, 1
+            0xBF84_0002, // s_cbranch_scc0 to the value 1
+            0x7E04_0206, // v_mov_b32 v2, s6
+            0xBF82_0001, // s_branch to the store
+            0x7E04_0281, // v_mov_b32 v2, 1
+        ],
+        SccUse::Branch => &[
+            0xBF84_0002, // s_cbranch_scc0 to the value 1
+            0x7E04_0282, // v_mov_b32 v2, 2
+            0xBF82_0001, // s_branch to the store
+            0x7E04_0281, // v_mov_b32 v2, 1
+        ],
+        SccUse::Select => &[
+            0x8506_8182, // s_cselect_b32 s6, 2, 1
+            0x7E04_0206, // v_mov_b32 v2, s6
+        ],
+    };
+    let mut body = vec![
+        0xBF8C_0000, // s_waitcnt 0: wait for the fixture's scalar descriptor load
+        0x7D88_0000, // v_cmp_gt_u32 vcc, s0, v0
+        0xBE8C_246A, // s_and_saveexec_b64 s[12:13], vcc
+        0xBF88_0000 | (5 + choice.len() as u32), // s_cbranch_execz to the restore
+        0x7D84_0001, // v_cmp_eq_u32 vcc, s1, v0
+        0x8792_7E6A, // s_and_b64 s[18:19], vcc, exec
+    ];
+    body.extend_from_slice(choice);
+    body.extend_from_slice(&[
+        0x3402_0082, // v_lshlrev_b32 v1, 2, v0
+        0xE070_1000,
+        0x8002_0201, // buffer_store_dword v2, v1, s[8:11], 0 offen
+        0xBEFE_040C, // s_mov_b64 exec, s[12:13]
+    ]);
+    native(&body)
+}
+
+fn emit_nested_mask_scc(native: &NativeProgram, p: &ir::Program) -> HostShader {
+    let st = structure::structure(p).expect("structure");
+    let res = resource::track(p, &native.layout, native.stage, Some(&st)).expect("resources");
+    let io = io::raise(p, native).expect("io");
+    let c = crate::Container {
+        digest: [0; 16],
+        version: (1, 0),
+        parts: Vec::new(),
+    };
+    let was = lower::TEST_HOST_WAVE.replace(Some(32));
+    let normal = super::emit(&c, native, p, &st, &io, &res);
+    lower::TEST_HOST_WAVE.set(was);
+    normal.expect("the production Wave32 fallback must lower the program")
+}
+
+#[test]
+fn the_mask_scc_in_a_lane_branch_lowers_without_its_exec_skip() {
+    let native = nested_mask_scc(SccUse::Combined);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("IR");
+    lower::take_needs();
+    let direct = lowered(&native, &p, &HashSet::new());
+    let needs = lower::take_needs();
+    assert!(matches!(
+        direct,
+        Err(ShaderError::Unsupported { what, .. }) if lower::needs_every_lane(what)
+    ));
+    let st = structure::structure(&p).expect("structure");
+    let enclosing = lower::branches_around(&st, &needs).expect("enclosing lane branch");
+    assert_eq!(enclosing.len(), 1);
+    assert_eq!(
+        p.blocks[enclosing[0]].insts.last().unwrap().name(),
+        "s_cbranch_execz"
+    );
+    let without_skip = ir::without_skips(&p, false).expect("removable EXEC skip");
+    lowered(&native, &without_skip, &HashSet::new()).expect("without skips");
+    let shader = emit_nested_mask_scc(&native, &p);
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        v.validate(&mut shader.dxil.clone())
+            .expect("DXIL validation");
+    }
+}
+
+/// Use VICTORY_WARP=1 to run the same readback on WARP.
+#[test]
+#[ignore = "requires a D3D12 device that executes Wave32"]
+fn both_halves_observe_the_same_mask_scc_on_a_wave32_device() {
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let host = Host::new(false).expect("Wave32 adapter");
+    // SAFETY: the LUID is the one returned by this device, and DXGI fills its adapter description.
+    let desc = unsafe {
+        use windows::Win32::Graphics::Dxgi::{
+            CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory4,
+        };
+        let factory: IDXGIFactory4 =
+            CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).expect("DXGI");
+        factory
+            .EnumAdapterByLuid::<IDXGIAdapter1>(host.device.GetAdapterLuid())
+            .unwrap()
+            .GetDesc1()
+            .unwrap()
+    };
+    let end = desc
+        .Description
+        .iter()
+        .position(|&w| w == 0)
+        .unwrap_or(desc.Description.len());
+    eprintln!(
+        "Wave32 device: {}",
+        String::from_utf16_lossy(&desc.Description[..end])
+    );
+
+    use windows::Win32::Graphics::Direct3D12::{
+        D3D12_FEATURE_D3D12_OPTIONS1, D3D12_FEATURE_DATA_D3D12_OPTIONS1,
+    };
+    let mut caps = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+    // SAFETY: the feature structure is initialized and sized as required by D3D12.
+    unsafe {
+        host.device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS1,
+                (&raw mut caps).cast(),
+                size_of_val(&caps) as u32,
+            )
+            .expect("wave capabilities");
+    }
+    eprintln!(
+        "Wave range: {}..{}",
+        caps.WaveLaneCountMin, caps.WaveLaneCountMax
+    );
+    if !caps.WaveOps.as_bool() || !(caps.WaveLaneCountMin..=caps.WaveLaneCountMax).contains(&32) {
+        eprintln!("0 Wave32 lane comparisons; unsupported on this adapter");
+        return;
+    }
+    let mut total_wrong = 0;
+    for which in [SccUse::Combined, SccUse::Branch, SccUse::Select] {
+        eprintln!("SCC_VARIANT {which:?}");
+        let native = nested_mask_scc(which);
+        let p = ir::build(&native.code, native.wave64, native.vgprs).expect("IR");
+        let shader = emit_nested_mask_scc(&native, &p);
+        let (root, pso) = host.compute_pipeline(&shader).expect("Wave32 pipeline");
+        for (below, selected) in MASK_SCC_CASES {
+            let mut constants = vec![0; shader.user_data_dwords().max(1) as usize];
+            for u in &shader.user_data {
+                if u.root == RootType::Constants && u.slot == 0 && u.dword < 2 {
+                    constants[u.index as usize] = [below, selected][u.dword as usize];
+                }
+            }
+            let buffers = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![(0, Root::Constants(constants))],
+                        views: &[View::RawUav(64)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .expect("dispatch and readback");
+            let result = &buffers[0];
+            assert_eq!(result.len(), 64);
+            eprintln!("SCC_WORDS {which:?} {below} {selected} {result:?}");
+            let mut wrong = 0;
+            for (lane, &word) in result.iter().enumerate() {
+                let expected = if lane as u32 >= below {
+                    0
+                } else {
+                    1 + u32::from(selected < below)
+                };
+                if word != expected {
+                    if wrong == 0 {
+                        eprintln!(
+                            "below {below}, selected {selected}: lane {lane} read {word}, expected {expected}"
+                        );
+                    }
+                    wrong += 1;
+                }
+            }
+            eprintln!("below {below}, selected {selected}: {wrong}/64 differences");
+            total_wrong += wrong;
+        }
+    }
+    assert_eq!(total_wrong, 0, "mismatching words in the generated cases");
+}
+
+/// An independent DXC-compiled group-wide OR. Compile the accompanying HLSL with
+/// `dxc -T cs_6_6 -E main -Fo ref.dxil testdata/wave64-mask-scc.hlsl` and set
+/// `SCC_REFERENCE_DXIL` to that file before explicitly running this test.
+#[test]
+#[ignore = "requires a D3D12 device and the compiled SCC_REFERENCE_DXIL"]
+fn independent_hlsl_group_any_scc_oracle() {
+    use windows::Win32::Graphics::Direct3D12::ID3D12RootSignature;
+    let host = Host::new(false).expect("adapter");
+    let code = std::fs::read(std::env::var_os("SCC_REFERENCE_DXIL").unwrap()).unwrap();
+    // SAFETY: our compiled shader embeds its root signature.
+    let root: ID3D12RootSignature = unsafe { host.device.CreateRootSignature(0, &code) }.unwrap();
+    let pso = host.compute_pipeline_with(&root, &code).unwrap();
+    for (below, selected) in MASK_SCC_CASES {
+        let buffers = host
+            .dispatch(
+                &root,
+                &pso,
+                &Dispatch {
+                    roots: vec![
+                        (0, Root::Constants(vec![below, selected])),
+                        (
+                            1,
+                            Root::Table {
+                                sampler: false,
+                                index: 0,
+                            },
+                        ),
+                    ],
+                    views: &[View::RawUav(64)],
+                    samplers: &[],
+                    groups: [1, 1, 1],
+                },
+            )
+            .unwrap();
+        let data = &buffers[0];
+        let expected: Vec<u32> = (0..64)
+            .map(|i| {
+                if i >= below {
+                    0
+                } else {
+                    1 + u32::from(selected < below)
+                }
+            })
+            .collect();
+        eprintln!("SCC_WORDS Hlsl {below} {selected} {data:?}");
+        assert_eq!(data, &expected);
+    }
+}

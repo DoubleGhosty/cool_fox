@@ -80,6 +80,8 @@ pub(super) fn folder() -> Option<PathBuf> {
 /// started at creation, since the start.
 pub(crate) static MADE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static LOADED: AtomicU64 = AtomicU64::new(0);
+/// Pipelines made whose store the library refused ([`store`]): not kept for a later run.
+pub(crate) static NOT_STORED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static EARLY: AtomicU64 = AtomicU64::new(0);
 /// For the memory lines: the bytes of the library's file, kept in memory
 /// while the library lives, and the bytes the last save wrote (a buffer of
@@ -564,6 +566,14 @@ pub(crate) fn pipeline(
         }
         Err(e) => e,
     };
+    // `E_INVALIDARG` is how the library says it has no pipeline of that name (or one with
+    // another description): one not made before, in the normal course. Said so in the
+    // trail, so that it is not read as a refusal of the pipeline (issue #70).
+    let refused = if refused.code() == windows::Win32::Foundation::E_INVALIDARG {
+        "not in it yet".to_owned()
+    } else {
+        refused.to_string()
+    };
     // Compiled outside any lock: compiles take up to seconds.
     let pso = {
         let _call = call("make", name);
@@ -596,8 +606,21 @@ fn store(library: &Library, wide: &HSTRING, pso: &ID3D12PipelineState) {
     // SAFETY: a live pipeline; a name already stored (a description that
     // differs, or one made twice at once) is refused, which leaves the
     // library as it was.
-    if unsafe { library.library.StorePipeline(PCWSTR(wide.as_ptr()), pso) }.is_ok() {
-        library.added.fetch_add(1, Ordering::Relaxed);
+    match unsafe { library.library.StorePipeline(PCWSTR(wide.as_ptr()), pso) } {
+        Ok(()) => {
+            library.added.fetch_add(1, Ordering::Relaxed);
+        }
+        // Said, once a name: a refused store was not seen at all before (issue #70), and a
+        // pipeline never stored is made again by every run.
+        Err(e) => {
+            NOT_STORED.fetch_add(1, Ordering::Relaxed);
+            static SAID: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+            let name = wide.to_string_lossy();
+            if SAID.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_default().insert(name.clone()) {
+                let label = LABEL.with(|l| l.borrow().clone());
+                tracing::info!(pipeline = %label, name, error = %e, "pipeline library: store refused; made again by the next run");
+            }
+        }
     }
 }
 
@@ -758,6 +781,7 @@ pub(crate) fn save(now: bool) {
             early = used.len(),
             made = MADE.load(Ordering::Relaxed),
             loaded = LOADED.load(Ordering::Relaxed),
+            not_stored = NOT_STORED.load(Ordering::Relaxed),
             started_early = EARLY.load(Ordering::Relaxed),
             "host pipeline library saved"
         ),
