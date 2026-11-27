@@ -4,9 +4,11 @@ if not "%~1"=="" if /i not "%~1"=="pareto-residency" (
   echo Usage: Play-VIctory.cmd pareto-residency 1>&2
   exit /b 2
 )
-if not defined VICTORY_GAME_DIR if exist "C:\Users\Ari Tech\Downloads\Other\GTA6.Xbox.v1.0.2.1-CYBERLEEK\game_scarlett_master.exe" set "VICTORY_GAME_DIR=C:\Users\Ari Tech\Downloads\Other\GTA6.Xbox.v1.0.2.1-CYBERLEEK"
+if not defined VICTORY_GAME_DIR if exist "%~dp0victory.toml" (
+  for /f "tokens=1,2 delims='" %%A in ('findstr /i "game_dir" "%~dp0victory.toml"') do set "VICTORY_GAME_DIR=%%B"
+)
 if not defined VICTORY_GAME_DIR (
-  echo Set VICTORY_GAME_DIR to the folder containing your title executable. 1>&2
+  echo Set VICTORY_GAME_DIR to the folder containing your title executable, or configure [paths].game_dir in victory.toml. 1>&2
   exit /b 2
 )
 if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
