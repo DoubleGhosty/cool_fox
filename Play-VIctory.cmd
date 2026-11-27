@@ -21,9 +21,15 @@ if not exist "%runner%" (
   echo Extract the Windows release or run cargo build --release --locked -p victory. 1>&2
   exit /b 2
 )
-rem Ambient lighting, crease shading & volumetric air ceiling
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=constant:0.25"
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.8"
+rem Resolution & Upscaler (1080p target avoids 4K fillrate choke on 8GB cards; upscaler 6 avoids FFX latency)
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1920x1080"
+if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
+rem Hair strands, simulation passes & accessories rendering
+if not defined VICTORY_HAIR set "VICTORY_HAIR=1"
+rem Ambient lighting, crease shading & volumetric air/fog march ceiling (prevents purple veil & window blowout)
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.5"
+if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=1.0"
 if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=1.2,0.8"
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
 rem Memory trimming & VRAM management (prevents 99% RAM stall & NVMe pagefile thrashing)

@@ -368,7 +368,7 @@ void clear_march(uint3 at : SV_DispatchThreadID) {
     float4 c = marched[at.xy];
     // (NaN or infinity: tested as in `keep`.)
     if (any((asuint(c.rgb) & 0x7f800000u) == 0x7f800000u)) { marched[at.xy] = float4(0.0, 0.0, 0.0, c.a); return; }
-    float cap = air * dot(cells[CELLS].rgb, LUMA);
+    float cap = air * (constant > 0.0 ? constant : dot(cells[CELLS].rgb, LUMA));
     float has = dot(c.rgb, LUMA);
     if (has > cap) marched[at.xy] = float4(c.rgb * (cap / has), c.a);
 }
@@ -661,7 +661,7 @@ pub(crate) fn clear_march(list: &HostList, image: This) -> bool {
         return false;
     };
     // (The slow mean: none with the constant, none before a keeping.)
-    if !matches!(set(), Set::Estimate(_)) || !KEPT.load(Ordering::Relaxed) {
+    if matches!(set(), Set::Off) || (matches!(set(), Set::Estimate(_)) && !KEPT.load(Ordering::Relaxed)) {
         return false;
     }
     let Some(copy) = crate::resource::host_copy(image) else {
@@ -695,6 +695,9 @@ pub(crate) fn clear_march(list: &HostList, image: This) -> bool {
     list.keep(&pass.cells);
     list.keep(&pass.points);
     let mut words = [0u32; 11];
+    if let Set::Constant(v) = set() {
+        words[1] = v.to_bits();
+    }
     words[10] = march().to_bits();
     let l = &list.list;
     // (The title's gathers before it wrote the image through other views.)
