@@ -3454,7 +3454,14 @@ static WIDE_WRITES: Mutex<Option<std::collections::HashMap<(usize, usize, usize)
 /// raw address (1).
 #[cfg(feature = "diagnostics")]
 pub(crate) fn wide_write(address: u64, len: u64, pipeline: usize) {
-    if len < 1 << 20 {
+    // Also the small ones (a page or less): fills of a few hundred bytes
+    // wait for flights that declare exactly their range, and nothing said
+    // which pass declares it.
+    // Asked for (`VICTORY_BLAME_SMALL=1`): thousands of small views a frame
+    // would be noted under this lock otherwise, in runs that measure.
+    static SMALL: OnceLock<bool> = OnceLock::new();
+    let small = len <= 4096 && *SMALL.get_or_init(|| std::env::var_os("VICTORY_BLAME_SMALL").is_some_and(|v| v == "1"));
+    if len < 1 << 20 && !small {
         return;
     }
     let mut all = WIDE_WRITES.lock().unwrap_or_else(|e| e.into_inner());
@@ -3546,7 +3553,7 @@ fn log_blame(frames: f64) {
             passes.into_iter().take(5).map(|(shaders, n)| format!("{shaders} {:.1}x", n as f64 / frames)).collect();
         tracing::info!(
             "waited for flights, per frame: {:.1} ms in {:.2} waits for {kind} +{len:#x} (last at {at:#x}), in shader writes declared \
-             over {from:#x}+{size:#x} (declared per frame over a megabyte or more there, by shader: {}){}{why}",
+             over {from:#x}+{size:#x} (declared per frame over a megabyte or more, or a page or less, there, by shader: {}){}{why}",
             us as f64 / 1e3 / frames,
             n as f64 / frames,
             passes.join(", "),
