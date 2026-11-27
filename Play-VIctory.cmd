@@ -57,6 +57,10 @@ if not defined VICTORY_PIPELINE_WAIT_MS set "VICTORY_PIPELINE_WAIT_MS=0"
 if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
 if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
 if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
+rem The title ends itself (a write to 0 at +0x23cf683) when its main loop has
+rem not ticked for 30 s, as while its first frames wait for their compute
+rem pipelines: while bit 0 of title+0x71b6330 is set its watchdog starts over.
+if not defined VICTORY_POKE set "VICTORY_POKE=71b6330:1"
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn"
 rem Series X, not S: on an 8 GB card series-s drops the head/skin meshes (faces
 rem render as eyes and teeth only); series-x renders them. Verified 2026-11-26.
