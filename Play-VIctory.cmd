@@ -27,11 +27,11 @@ if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.667"
 if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
 rem Hair strands, simulation passes & accessories rendering
 if not defined VICTORY_HAIR set "VICTORY_HAIR=1"
-rem Ambient lighting, crease shading & volumetric air/fog march ceiling (prevents purple veil & window blowout)
+rem Ambient lighting & volumetric air/fog march ceiling (prevents purple veil & window blowout; shade=0 eliminates horizontal face bands)
 if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1"
 if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.8"
 if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=0.8"
-if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=1.2,0.6"
+if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.0,0.0"
 if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=250,2"
 rem World geometry & room wall rendering (prevents scissor-culling from cutting away interior room walls)
 if not defined VICTORY_SCISSOR_TEST set "VICTORY_SCISSOR_TEST=full"
@@ -60,13 +60,13 @@ if not defined VICTORY_ASYNC_SUBMIT set "VICTORY_ASYNC_SUBMIT=1"
 if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=4"
 if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
 if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=0"
-rem GPU buffer acceleration & pipelined relay
+rem GPU buffer acceleration & pipelined relay (stage 2 ensures readbacks land before present to render all room walls)
 if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=512"
 if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=2"
 if not defined VICTORY_TEXTURE_NO_WAIT set "VICTORY_TEXTURE_NO_WAIT=1"
 if not defined VICTORY_RELAY set "VICTORY_RELAY=2"
-if not defined VICTORY_LATE_WAIT set "VICTORY_LATE_WAIT=3"
+if not defined VICTORY_LATE_WAIT set "VICTORY_LATE_WAIT=2"
 if not defined VICTORY_WIDE_BACK set "VICTORY_WIDE_BACK=1"
 if not defined VICTORY_CARD_REHASH_RUNS set "VICTORY_CARD_REHASH_RUNS=1"
 if not defined VICTORY_JOIN_COPIES set "VICTORY_JOIN_COPIES=1"
