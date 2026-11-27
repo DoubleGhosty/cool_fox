@@ -523,6 +523,10 @@ impl Module {
         let V::Inst(i) = phi else { panic!() };
         self.insts[i as usize].op = Op::Phi(incoming);
     }
+    pub fn is_terminated(&self, block: usize) -> bool {
+        self.blocks[block].term.is_some()
+    }
+
     pub fn terminate(&mut self, block: usize, t: Term) {
         self.blocks[block].term = Some(t);
     }
