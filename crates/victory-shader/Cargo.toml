@@ -9,7 +9,11 @@ publish.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+tracing.workspace = true
 zlib-rs.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
 
 [features]
 # Exports D3D12SDKVersion/D3D12SDKPath in test binaries for Windows 10 Agility SDK.
