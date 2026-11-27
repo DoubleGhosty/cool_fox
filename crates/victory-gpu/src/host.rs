@@ -3644,7 +3644,21 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
             }
         }
     }
-    (!placed.is_empty() && place::read_by(runs, placed)).then_some(WHY_READ)
+    if placed.is_empty() {
+        return None;
+    }
+    #[cfg(feature = "diagnostics")]
+    let first = placed[0];
+    if !place::read_by(runs, placed) {
+        return None;
+    }
+    // Named like the other reads: unnamed, this wait was counted as "a host
+    // copy of what a copy done on the card wrote", which it is not.
+    #[cfg(feature = "diagnostics")]
+    if count {
+        blame("a read of a buffer copy's destination at its place", written, first.0, first.1 - first.0);
+    }
+    Some(WHY_READ)
 }
 
 /// With flights in the air, after the submission's write-watch asking:
