@@ -94,7 +94,6 @@ enum Retired {
 // reference-counted wrappers holding them, dropped once.
 unsafe impl Send for Retired {}
 
-/// Milliseconds since the first call.
 /// The card's budget we plan with, from the system's: `VICTORY_CARD_BUDGET_MB`
 /// if set (at most the system's), else under Wine the system's less 1 GiB.
 /// On Windows the system moves what does not fit to the PC's memory; on
@@ -126,6 +125,7 @@ pub fn under_wine() -> bool {
     })
 }
 
+/// Milliseconds since the first call.
 pub(crate) fn now_ms() -> u64 {
     static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
     EPOCH.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64

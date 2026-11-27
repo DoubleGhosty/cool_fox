@@ -224,7 +224,7 @@ impl Pending {
         if self.made.get().is_none() {
             if self.building.swap(true, Ordering::AcqRel) {
                 let (lock, done) = &DONE;
-                let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
+                let mut asked = Instant::now();
                 while self.made.get().is_none() && !self.failed.load(Ordering::Acquire) {
                     let mut step = Duration::from_millis(50);
                     if let Some(until) = until {
@@ -234,8 +234,22 @@ impl Pending {
                         }
                         step = step.min(left);
                     }
-                    // (timed: a notification may come between the test and the wait)
-                    held = done.wait_timeout(held, step).unwrap_or_else(|e| e.into_inner()).0;
+                    {
+                        let held = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        if self.made.get().is_some() || self.failed.load(Ordering::Acquire) {
+                            break;
+                        }
+                        // (timed: a notification may come between the test and the wait)
+                        let _ = done.wait_timeout(held, step);
+                    }
+                    // Whether the thread making it ended is asked here too: with no frame
+                    // budget (`VICTORY_PIPELINE_WAIT_MS=0`) `wait` never asks, and a dispatch
+                    // waiting for its compute pipeline would wait for ever. Outside `DONE`,
+                    // which `give_up` takes.
+                    if asked.elapsed() >= Duration::from_secs(1) {
+                        reap();
+                        asked = Instant::now();
+                    }
                 }
                 return;
             }
