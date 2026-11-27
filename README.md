@@ -59,10 +59,18 @@ powershell -ExecutionPolicy Bypass -File scripts\get-agility-sdk.ps1
 ```
 
 The feature makes `victory.exe` ask for Microsoft's `D3D12Core.dll` 1.619.6 in `D3D12\`
-beside it, and the script fetches it from NuGet and puts it there (and beside the test
-programs in `target\debug\deps` when built with `--features agility-sdk`). Such a build
-needs the DLL: without it D3D12 does not start (`0x887E0003`). The default build is
-unchanged and does not need it. Not for Wine or Proton.
+beside it, and the script fetches it from NuGet and puts it there. Such a build needs the
+DLL: without it D3D12 does not start (`0x887E0003`). The default build is unchanged
+and does not need it. Not for Wine or Proton.
+
+The GPU tests on Windows 10 need the same. Build the test programs, run the script once
+more (it also fills `target\debug\deps\D3D12\`), then run the same tests:
+
+```powershell
+cargo test --locked -p victory-shader -p victory-gpu --features victory-shader/agility-sdk,victory-gpu/agility-sdk --no-run
+powershell -ExecutionPolicy Bypass -File scripts\get-agility-sdk.ps1
+cargo test --locked -p victory-shader -p victory-gpu --features victory-shader/agility-sdk,victory-gpu/agility-sdk
+```
 
 ### Launch
 

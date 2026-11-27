@@ -873,9 +873,6 @@ impl Module {
                 V::Const(i) => funcs + i,
                 V::Inst(i) => {
                     let id = ids[i as usize];
-                    // A void instruction (store, etc.) has no value id; treat
-                    // it as the last constant so the module is still valid
-                    // rather than panicking the whole translation thread.
                     if id == u32::MAX {
                         funcs.saturating_sub(1)
                     } else {

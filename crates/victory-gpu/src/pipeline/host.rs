@@ -1048,6 +1048,15 @@ fn bindless_heaps_supported() -> bool {
             D3D12SerializeVersionedRootSignature(&desc, &mut blob, None).is_ok()
         };
         tracing::info!(ok, "bindless heap root signature flags probe");
+        if !ok {
+            // Windows 10's own D3D12 (issues #68, #69): the translated programs index the heaps
+            // directly, so their pipelines are refused (0x80070057) and the title stalls.
+            tracing::warn!(
+                "this D3D12 runtime has no shader model 6.6 bindless heaps (Windows 10?): pipelines \
+                 that index the heaps are refused. Build with `--features agility-sdk` and run \
+                 scripts\\get-agility-sdk.ps1 (see the README's build steps)"
+            );
+        }
         ok
     })
 }
@@ -1155,8 +1164,6 @@ mod tests {
         }
     }
 
-    /// A mesh pipeline made once is loaded from the library the next time,
-    /// not compiled again (a stream without a topology never loads).
     /// A name the library does not have is `E_INVALIDARG`, the code the trail now calls
     /// "not in it yet" (issue #70 read it as the library refusing the pipeline).
     #[test]
@@ -1193,6 +1200,8 @@ mod tests {
         }
     }
 
+    /// A mesh pipeline made once is loaded from the library the next time,
+    /// not compiled again (a stream without a topology never loads).
     #[test]
     fn a_mesh_pipeline_loads_from_the_library() {
         let Some(host) = host() else {
@@ -1308,14 +1317,17 @@ mod tests {
         let (root, root_blob) = root_signature(&host.device, &[], &[], false).unwrap();
 
         let mut g = GraphicsState::default();
-        // Subobject 21 (`DEPTH_STENCIL1`) with `DepthBoundsTestEnable = true`,
-        // depth test itself off so only depth bounds gates the draw.
+        // Subobject 21 (`DEPTH_STENCIL1`) with `DepthBoundsTestEnable = true`
+        // and a depth test that always passes and writes nothing, so only
+        // depth bounds gates the draw. (With the depth test off, the draw
+        // outside the bounds passed on the CI runners' adapter, WARP,
+        // which seems to leave the whole depth stage out then.)
         #[repr(C, align(8))]
         struct Sub21(u32, D3D12_DEPTH_STENCIL_DESC1);
         let sub = Sub21(
             21,
             D3D12_DEPTH_STENCIL_DESC1 {
-                DepthEnable: false.into(),
+                DepthEnable: true.into(),
                 DepthWriteMask: D3D12_DEPTH_WRITE_MASK_ZERO,
                 DepthFunc: D3D12_COMPARISON_FUNC_ALWAYS,
                 DepthBoundsTestEnable: true.into(),

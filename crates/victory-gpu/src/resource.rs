@@ -101,6 +101,7 @@ pub(crate) struct ResourceDesc {
 #[cfg(windows)]
 impl ResourceDesc {
     /// The texture of this one's levels from `base` on.
+    #[allow(clippy::wrong_self_convention)]
     fn from_level(&self, base: u32) -> ResourceDesc {
         let mut d = *self;
         if base > 0 {
@@ -2675,7 +2676,7 @@ fn host_texture_as(
         }
     };
     if let Err(e) = &made {
-        crate::residency::allocation_error(&e);
+        crate::residency::allocation_error(e);
         tracing::warn!(error = %e, desc = ?d, reserved, "no host texture");
     }
     if !reserved
@@ -3096,9 +3097,14 @@ static PLACED_RAW: std::sync::Mutex<std::collections::BTreeSet<(u64, [u32; 14])>
 static PLACED_TWINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// See [`PLACED_TWINS`].
-#[cfg(all(windows, feature = "diagnostics"))]
+/// Counted only in the diagnostics build; 0 otherwise.
+#[cfg(windows)]
+#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))] // read by `copystat`
 pub(crate) fn placed_filler_twins() -> u64 {
-    PLACED_TWINS.load(std::sync::atomic::Ordering::Relaxed)
+    #[cfg(feature = "diagnostics")]
+    return PLACED_TWINS.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(feature = "diagnostics"))]
+    0
 }
 
 /// Whether [`PLACED_RAW`] holding `len` entries takes one more.
