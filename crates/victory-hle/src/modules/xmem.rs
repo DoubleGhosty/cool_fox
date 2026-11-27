@@ -1347,22 +1347,28 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
 /// the title maps pages into a pool view, then has the GPU map them into its tiled
 /// heap. Page by page; false if a source page is not mapped physical memory.
 pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
-    let (to, from, len) = (to as usize, from as usize, len as usize);
     let _costed = Costed::begin(None);
+    map_alias_inner(to, from, len)
+}
+
+fn map_alias_inner(to: u64, from: u64, len: u64) -> bool {
     let _busy = Busy::begin();
     let mut physical = physical();
     // As in `XMemMapPhysicalPages`: no read in place meets the gap.
     let _changing = victory_gpu::title_memory_remapping();
-    unmap(&mut physical, to, len);
+    map_alias_locked(&mut physical, to as usize, from as usize, len as usize)
+}
+
+fn map_alias_locked(physical: &mut Physical, to: usize, from: usize, len: usize) -> bool {
+    unmap(physical, to, len);
+    if from == 0 {
+        return true;
+    }
     for k in (0..len).step_by(PAGE) {
-        if from == 0 {
-            break;
-        }
-        let at = from + k;
-        let Some(slice) = physical.slice_at(at) else {
+        let Some(slice) = physical.slice_at(from + k) else {
             return false;
         };
-        if !map(&mut physical, to + k, PAGE, slice) {
+        if !map(physical, to + k, PAGE, slice) {
             return false;
         }
     }
@@ -1373,8 +1379,26 @@ pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
 pub fn map_aliases(ranges: &[(u64, u64, u64)]) -> bool {
     let _costed = Costed::begin(None);
     lift_thread();
+    // Native Windows placeholders can be split and joined for larger views.
+    // VICTORY_PAGE_MAP_FAST=0 keeps the original mapping path.
+    static FAST: LazyLock<bool> =
+        LazyLock::new(|| !on_wine() && std::env::var_os("VICTORY_PAGE_MAP_FAST").is_none_or(|v| v != "0"));
+    if *FAST
+        && ranges.iter().all(|&(to, from, len)| {
+            let (to, from, len) = (to as usize, from as usize, len as usize);
+            len == 0
+                || (to != 0
+                    && to % PAGE == 0
+                    && from % PAGE == 0
+                    && len % PAGE == 0
+                    && to.checked_add(len).is_some()
+                    && (from == 0 || from.checked_add(len).is_some() && to.abs_diff(from) >= len))
+        })
+    {
+        return map_aliases_fast(ranges);
+    }
     if side_by_side() <= 1 {
-        return ranges.iter().all(|&(to, from, len)| map_alias(to, from, len));
+        return ranges.iter().all(|&(to, from, len)| map_alias_inner(to, from, len));
     }
     // By the page: the address, and the one whose page it is to show.
     let pages: Vec<(usize, Option<usize>)> = ranges
@@ -1384,7 +1408,7 @@ pub fn map_aliases(ranges: &[(u64, u64, u64)]) -> bool {
         })
         .collect();
     if pages.iter().any(|p| p.0 % PAGE != 0 || p.1.is_some_and(|from| from % PAGE != 0)) {
-        return ranges.iter().all(|&(to, from, len)| map_alias(to, from, len));
+        return ranges.iter().all(|&(to, from, len)| map_alias_inner(to, from, len));
     }
     let mut ok = true;
     let mut at = 0;
@@ -1409,6 +1433,173 @@ pub fn map_aliases(ranges: &[(u64, u64, u64)]) -> bool {
         ok &= change(&mut physical, ops);
     }
     ok
+}
+
+struct AliasRun {
+    at: usize,
+    len: usize,
+    slice: Option<Slice>,
+}
+
+impl AliasRun {
+    fn joins(&self, next: &Self) -> bool {
+        self.at + self.len == next.at
+            && match (&self.slice, &next.slice) {
+                (Some(a), Some(b)) => Arc::ptr_eq(&a.section, &b.section) && a.index + self.len / PAGE == b.index,
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+/// Copy independent ranges together, under one remapping guard. A copy that
+/// uses or overwrites an earlier destination sees the result of that copy.
+fn map_aliases_fast(ranges: &[(u64, u64, u64)]) -> bool {
+    let _busy = Busy::begin();
+    let mut physical = physical();
+    let _changing = victory_gpu::title_memory_remapping();
+    let mut destinations = BTreeMap::<usize, usize>::new();
+    let mut runs = Vec::new();
+    for &(to, from, len) in ranges {
+        let (to, from, len) = (to as usize, from as usize, len as usize);
+        if len == 0 {
+            continue;
+        }
+        let hits = |base| {
+            destinations.range(..base + len).next_back().is_some_and(|(_, &end)| end > base)
+        };
+        if hits(to) || (from != 0 && hits(from)) {
+            if !apply_alias_runs(&mut physical, &mut runs) {
+                return false;
+            }
+            destinations.clear();
+        }
+        let before = runs.len();
+        if from == 0 {
+            runs.push(AliasRun { at: to, len, slice: None });
+        } else {
+            for offset in (0..len).step_by(PAGE) {
+                let Some(slice) = physical.slice_at(from + offset) else {
+                    // Finish the preceding copies before handling a missing
+                    // source as the original per-range path does.
+                    runs.truncate(before);
+                    return apply_alias_runs(&mut physical, &mut runs)
+                        && map_alias_locked(&mut physical, to, from, len);
+                };
+                let next = AliasRun {
+                    at: to + offset,
+                    len: PAGE,
+                    slice: Some(slice),
+                };
+                match runs.last_mut() {
+                    Some(run) if offset != 0 && run.joins(&next) => run.len += PAGE,
+                    _ => runs.push(next),
+                }
+            }
+        }
+        destinations.insert(to, to + len);
+    }
+    apply_alias_runs(&mut physical, &mut runs)
+}
+
+fn apply_alias_runs(physical: &mut Physical, runs: &mut Vec<AliasRun>) -> bool {
+    runs.sort_unstable_by_key(|run| run.at);
+    runs.dedup_by(|next, run| {
+        let joins = run.joins(next);
+        if joins {
+            run.len += next.len;
+        }
+        joins
+    });
+    runs.retain(|run| !keep_alias(physical, run));
+    // Unmap adjacent changes together so a cut through an existing view
+    // remaps its surviving prefix and suffix just once for that range.
+    for group in runs.chunk_by(|a, b| a.at + a.len == b.at) {
+        let first = &group[0];
+        let last = &group[group.len() - 1];
+        unmap(physical, first.at, last.at + last.len - first.at);
+    }
+    let mut ok = true;
+    for AliasRun { at, len, slice } in runs.drain(..) {
+        if let Some(slice) = slice {
+            ok &= map_alias_run(physical, at, len, slice);
+        }
+    }
+    ok
+}
+
+/// An exact view of the same pages can stay, with write access restored.
+fn keep_alias(physical: &Physical, run: &AliasRun) -> bool {
+    let Some(slice) = &run.slice else {
+        return false;
+    };
+    if !physical.views.get(&run.at).is_some_and(|(len, there)| {
+        *len == run.len && Arc::ptr_eq(&there.section, &slice.section) && there.index == slice.index
+    }) {
+        return false;
+    }
+    victory_gpu::title_memory_unmapping(run.at, run.len);
+    let mut old = 0;
+    // SAFETY: an exact view of these committed pages.
+    if unsafe {
+        windows_sys::Win32::System::Memory::VirtualProtect(
+            run.at as *const c_void,
+            run.len,
+            PAGE_READWRITE,
+            &mut old,
+        )
+    } == 0
+    {
+        return false;
+    }
+    victory_gpu::title_memory_remapped(run.at, run.len);
+    victory_gpu::title_memory_view(
+        run.at,
+        run.len,
+        slice.section.handle as usize,
+        (slice.index * PAGE) as u64,
+    );
+    true
+}
+
+fn map_alias_run(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
+    if len == PAGE {
+        return map(physical, base, len, slice);
+    }
+    let own = alias_placeholder(physical, base, len);
+    if show_view(base, len, &slice, own, false) {
+        note_view(physical, base, len, slice);
+        return true;
+    }
+    // The host may refuse a join across reservations. Each accepted page
+    // is recorded as its own view.
+    (0..len).step_by(PAGE).all(|k| {
+        let page = Slice { section: slice.section.clone(), index: slice.index + k / PAGE };
+        map(physical, base + k, PAGE, page)
+    })
+}
+
+const MEM_COALESCE_PLACEHOLDERS: u32 = 1;
+
+/// Cuts out one placeholder or joins the pieces of the original views.
+fn alias_placeholder(physical: &mut Physical, base: usize, len: usize) -> bool {
+    let first = physical.holes.remove(&base);
+    if (first == Some(len) && lean()) || split(base, len) {
+        return true;
+    }
+    let end = base + len;
+    let mut at = base;
+    while at < end {
+        match if at == base { first } else { physical.holes.remove(&at) } {
+            Some(n) if n >= PAGE && n <= end - at => at += n,
+            _ => {
+                split(at, PAGE);
+                at += PAGE;
+            }
+        }
+    }
+    // SAFETY: the flag only joins placeholders that exactly cover this range.
+    unsafe { VirtualFree(base as *mut c_void, len, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS) != 0 }
 }
 
 /// Maps (page number not 0) or unmaps each address; false if a page is not
@@ -1770,6 +1961,11 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     if !show(base, len, &slice, own) {
         return false;
     }
+    note_view(physical, base, len, slice);
+    true
+}
+
+fn note_view(physical: &mut Physical, base: usize, len: usize, slice: Slice) {
     // Noted before the GPU side is told: bytes DirectStorage put in earlier,
     // without notice at these addresses ([`pages_written`]), are there by
     // the time the copies of them go.
@@ -1779,12 +1975,11 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     // What the range shows now, for the GPU side's in-place census.
     victory_gpu::title_memory_view(base, len, slice.section.handle as usize, (slice.index * PAGE) as u64);
     physical.views.insert(base, (len, slice));
-    true
 }
 
 /// Cuts `[base, base + len)` out of the placeholder it is in (which fails
 /// harmlessly when the range is the whole placeholder).
-fn split(base: usize, len: usize) {
+fn split(base: usize, len: usize) -> bool {
     // SAFETY: acts only on a placeholder.
     counted(Call::Split, || unsafe {
         VirtualFree(
@@ -1792,12 +1987,16 @@ fn split(base: usize, len: usize) {
             len,
             MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER,
         )
-    });
+    }) != 0
 }
 
 /// The system calls of [`map`]; `own`: the placeholder at `base` is `len`
 /// long already.
 fn show(base: usize, len: usize, slice: &Slice, own: bool) -> bool {
+    show_view(base, len, slice, own, true)
+}
+
+fn show_view(base: usize, len: usize, slice: &Slice, own: bool, warn: bool) -> bool {
     let map_view = || {
         // SAFETY: maps the section over a placeholder; acts only on one.
         counted(Call::Map, || unsafe {
@@ -1820,17 +2019,19 @@ fn show(base: usize, len: usize, slice: &Slice, own: bool) -> bool {
         view = map_view();
     }
     if view.Value as usize != base {
-        tracing::warn!(
-            address = format_args!("{base:#x}"),
-            len,
-            error = %std::io::Error::last_os_error(),
-            "mapping physical pages failed (not a placeholder?)"
-        );
+        if warn {
+            tracing::warn!(
+                address = format_args!("{base:#x}"),
+                len,
+                error = %std::io::Error::last_os_error(),
+                "mapping physical pages failed (not a placeholder?)"
+            );
+        }
         return false;
     }
     if !slice.section.commit_shown(slice.index, base, len) {
         // SAFETY: the view just mapped, back to a placeholder.
-        unsafe { UnmapViewOfFile2(GetCurrentProcess(), view, MEM_PRESERVE_PLACEHOLDER) };
+        counted(Call::Unmap, || unsafe { UnmapViewOfFile2(GetCurrentProcess(), view, MEM_PRESERVE_PLACEHOLDER) });
         return false;
     }
     true
@@ -2041,7 +2242,6 @@ pub extern "system" fn XMemTransferMemory(kind: u32, size: usize) -> BOOL {
 /// The title's own `VirtualFree`. What the GPU side noted of the memory goes
 /// first: the address may be other memory's the moment it is free.
 extern "system" fn title_virtual_free(address: *mut c_void, size: usize, kind: u32) -> BOOL {
-    const MEM_COALESCE_PLACEHOLDERS: u32 = 1;
     // Splitting and joining placeholders changes nothing they show.
     if kind & (MEM_PRESERVE_PLACEHOLDER | MEM_COALESCE_PLACEHOLDERS) == 0 {
         victory_gpu::title_memory_freed(address as usize, size);
@@ -2474,6 +2674,45 @@ mod tests {
         assert!(map_aliases(&[(a as u64, 0, (2 * N * PAGE) as u64)]));
         assert!((0..2 * N).all(|k| query(at(k)).host.State == MEM_RESERVE));
         assert!(physical().views.range(a..a + 2 * N * PAGE).next().is_none());
+        assert_eq!(XMemFreePhysicalPages(N, pages.as_ptr()), 1);
+    }
+
+    #[test]
+    fn page_mapping_runs_keep_the_right_pages_when_cut() {
+        const N: usize = 6;
+        let pages = allocate(N);
+        let reserve = || {
+            XMemVirtualAlloc(std::ptr::null_mut(), N * PAGE, MEM_RESERVE | PAGES_64K, 0, PAGE_READWRITE)
+                as usize
+        };
+        let (source, dest) = (reserve(), reserve());
+        assert!(source != 0 && dest != 0);
+        assert_eq!(XMemMapPhysicalPages(source as *mut c_void, N, pages.as_ptr()) as usize, source);
+        for k in 0..N {
+            // SAFETY: mapped read-write.
+            unsafe { ((source + k * PAGE) as *mut usize).write(k + 1) };
+        }
+        let word = |k| {
+            // SAFETY: callers read the pages still mapped below.
+            unsafe { ((dest + k * PAGE) as *const usize).read() }
+        };
+        let copy = |to, from, n: usize| map_aliases_fast(&[(to as u64, from as u64, (n * PAGE) as u64)]);
+        // One placeholder per page, then a single view over their union.
+        for k in 0..N {
+            assert!(map_alias((dest + k * PAGE) as u64, (source + k * PAGE) as u64, PAGE as u64));
+        }
+        assert!(copy(dest, source, N));
+        assert_eq!(physical().views.get(&dest).map(|v| v.0), Some(N * PAGE));
+        assert!(copy(dest, source, N));
+        // The same section at the ends, a different slice in the middle.
+        assert!(copy(dest + 2 * PAGE, source + 4 * PAGE, 1));
+        assert_eq!((word(0), word(2), word(5)), (1, 5, 6));
+        // A later unmap inside the surviving suffix preserves both sides.
+        assert!(map_alias((dest + 4 * PAGE) as u64, 0, PAGE as u64));
+        assert_eq!(query((dest + 4 * PAGE) as *const c_void).host.State, MEM_RESERVE);
+        assert_eq!((word(3), word(5)), (4, 6));
+        assert!(map_alias(dest as u64, 0, (N * PAGE) as u64));
+        assert!(map_alias(source as u64, 0, (N * PAGE) as u64));
         assert_eq!(XMemFreePhysicalPages(N, pages.as_ptr()), 1);
     }
 
