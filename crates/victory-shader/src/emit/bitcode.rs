@@ -656,6 +656,78 @@ impl Module {
                 self.insts[id as usize].op = Op::Phi(rest);
             }
         }
+        self.single_back_edges();
+    }
+
+    /// Gives every block one back edge at most, as DXC's code has: a block
+    /// that closes two loops at once (an inner one and one around it) sends
+    /// the way to every header but the innermost through a block of its own,
+    /// which becomes that loop's latch (and is not folded back, below).
+    /// vkd3d-proton's DXIL conversion keeps one back edge per block, takes
+    /// the other for a forward edge and then recurses without end over the
+    /// cycle that makes: on `CS_Prop_BatchNoCull` a 4 GiB stack overflowed,
+    /// its dispatch was dropped and the title ended the run 30 s later with
+    /// its write to 0 at +0x23cf683 (#39).
+    fn single_back_edges(&mut self) {
+        let n = self.blocks.len();
+        if n == 0 {
+            return;
+        }
+        // Depth-first from the entry, as above; a header found later is
+        // nested deeper.
+        let mut state = vec![0u8; n];
+        let mut found = vec![0usize; n];
+        let mut stack = vec![(0usize, 0usize)];
+        state[0] = 1;
+        let mut back: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut next = 1;
+        while let Some(top) = stack.last_mut() {
+            let (b, k) = *top;
+            let succ = self.successors(b);
+            if k < succ.len() {
+                top.1 += 1;
+                let t = succ[k];
+                match state[t] {
+                    0 => {
+                        state[t] = 1;
+                        found[t] = next;
+                        next += 1;
+                        stack.push((t, 0));
+                    }
+                    1 => back.entry(b).or_default().push(t),
+                    _ => {}
+                }
+            } else {
+                state[b] = 2;
+                stack.pop();
+            }
+        }
+        for (b, mut headers) in back {
+            headers.sort_unstable();
+            headers.dedup();
+            if headers.len() < 2 {
+                continue;
+            }
+            let innermost = headers.iter().copied().max_by_key(|&h| found[h]).expect("two headers");
+            for header in headers.into_iter().filter(|&h| h != innermost) {
+                let latch = self.new_block();
+                let to = |t: usize| if t == header { latch } else { t };
+                self.blocks[b].term = match self.blocks[b].term {
+                    Some(Term::Br(t)) => Some(Term::Br(to(t))),
+                    Some(Term::CondBr(c, t, f)) => Some(Term::CondBr(c, to(t), to(f))),
+                    other => other,
+                };
+                self.blocks[latch].term = Some(Term::Br(header));
+                // What came from `b` comes through the new block, as it was.
+                for id in self.blocks[header].phis.clone() {
+                    let Op::Phi(incoming) = self.insts[id as usize].op.clone() else {
+                        continue;
+                    };
+                    let incoming = incoming.into_iter().map(|(v, p)| (v, if p == b { latch } else { p })).collect();
+                    self.insts[id as usize].op = Op::Phi(incoming);
+                }
+            }
+        }
     }
 
 
@@ -826,6 +898,9 @@ impl Module {
         // An empty latch (only a branch back to its loop header) is folded
         // into its one predecessor, so the exiting block is the latch as in
         // DXC's loops; the AMD driver hangs on divergent loops otherwise.
+        // Not into one that is the latch of another loop already: that
+        // block would have two back edges, which `single_back_edges` took
+        // apart for vkd3d-proton's dxil-spirv.
         let mut preds = vec![Vec::new(); self.blocks.len()];
         for &b in &post {
             for &s in succs(b).iter() {
@@ -841,6 +916,7 @@ impl Module {
                 &preds[b][..],
             ) && pos[h] < pos[b]
                 && !succs(*p).contains(&h)
+                && !succs(*p).iter().any(|&s| s != b && pos[s] <= pos[*p])
             {
                 fold[b] = Some((*p, h));
             }
@@ -1390,6 +1466,46 @@ mod tests {
                 fnv(&bytes)
             );
         }
+    }
+
+    /// A block that closes two loops at once (an inner one and the one
+    /// around it) keeps the inner back edge and sends the outer one through a
+    /// block of its own (vkd3d-proton keeps one back edge per block), which
+    /// the empty-latch folding leaves where it is.
+    #[test]
+    fn a_block_that_closes_two_loops_gets_one_back_edge() {
+        let mut m = Module::default();
+        let i32t = m.int(32);
+        let void = m.void();
+        let main_ty = m.func_ty(void, vec![]);
+        m.function("main", main_ty, None, true);
+        let [entry, outer, inner, latch, exit] = [(); 5].map(|()| m.new_block());
+        let (zero, one, two) = (m.i32(0), m.i32(1), m.i32(2));
+        m.terminate(entry, Term::Br(outer));
+        let po = m.phi(outer, i32t);
+        let d = m.cmp(outer, pred::IULT, po, two);
+        m.terminate(outer, Term::CondBr(d, inner, exit));
+        let pi = m.phi(inner, i32t);
+        m.terminate(inner, Term::Br(latch));
+        let x = m.bin(latch, Bin::Add, pi, one);
+        let c = m.cmp(latch, pred::IULT, x, two);
+        m.terminate(latch, Term::CondBr(c, inner, outer));
+        m.terminate(exit, Term::Ret);
+        m.set_phi(po, vec![(zero, entry), (x, latch)]);
+        m.set_phi(pi, vec![(zero, outer), (x, latch)]);
+        m.single_latches();
+        let new = m.blocks.len() - 1;
+        assert_eq!(m.successors(latch), [inner, new]);
+        assert_eq!(m.successors(new), [outer]);
+        let V::Inst(id) = po else { panic!() };
+        let Op::Phi(incoming) = &m.insts[id as usize].op else { panic!() };
+        assert_eq!(incoming, &[(zero, entry), (x, new)]);
+        // Written with the new block: folded back into the latch, it would
+        // write exactly what the module without it writes.
+        let with = m.write();
+        m.blocks[latch].term = Some(Term::CondBr(c, inner, outer));
+        m.set_phi(po, vec![(zero, entry), (x, latch)]);
+        assert_ne!(with, m.write());
     }
 
     /// A loop header with two back edges gets one, through a new block that
