@@ -184,13 +184,13 @@ impl Pending {
     }
 }
 
-/// Why a pipeline has no host pipeline (diagnostics): its shaders that do
-/// not translate, else "refused" or "being made"; `None` if it has one.
+/// Explain a missing host pipeline, including passes skipped before queueing.
+/// A completed host pipeline has no missing reason.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn missing(p: &Pending) -> Option<String> {
     match p.made.get() {
         Some(Some(_)) => None,
-        None => Some("being made".into()),
+        None => Some(p.left_out.unwrap_or("being made").to_owned()),
         Some(None) => {
             let failed: Vec<String> = p
                 .shaders
@@ -654,6 +654,18 @@ mod tests {
         assert!(p.required_initialization && p.scene_input && p.screen);
         assert!(!pending("pixel", name).required_initialization);
         assert!(!pending("compute", b"CS_PedStandardSkinning_0").required_initialization);
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn an_intentionally_skipped_pipeline_reports_its_reason() {
+        let mut pending = Pending::new(Vec::new(), None);
+        assert_eq!(missing(&pending).as_deref(), Some("being made"));
+        pending.left_out = Some("sample pass disabled");
+        let pending = Arc::new(pending);
+        assert!(ready(&pending).is_none());
+        assert_eq!(pending.queue_state.load(Ordering::Relaxed), NOT_QUEUED);
+        assert_eq!(missing(&pending).as_deref(), pending.left_out);
     }
 
     #[test]
