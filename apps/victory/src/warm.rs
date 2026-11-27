@@ -38,16 +38,9 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     let bad_file = dir.join("warm-bad.txt");
     let keys = known::keys(&dir);
     let listed = std::fs::read_to_string(&done_file).unwrap_or_default();
-    let mut done: HashSet<&str> = HashSet::new();
-    for line in listed.lines() {
-        if let Some((of, key)) = line.split_once(' ')
-            && of == fingerprint
-        {
-            done.insert(key);
-        }
-    }
+    let done = recorded_keys(&listed, &fingerprint);
     let bad = std::fs::read_to_string(&bad_file).unwrap_or_default();
-    let bad: HashSet<&str> = bad.lines().filter_map(|l| l.split(' ').next()).collect();
+    let bad = recorded_keys(&bad, &fingerprint);
     let early = std::fs::read_to_string(dir.join("early-pipelines.txt")).unwrap_or_default();
     let early: HashSet<&str> = early.lines().collect();
     // Those earlier runs drew with first, the others in no order (by key).
@@ -100,7 +93,7 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
                             (Some(why), Some((&n, after))) => {
                                 // The one it was at.
                                 println!("pipeline {n} {}: {why}", keys[n]);
-                                let _ = writeln!(lock(&bad_out), "{} {why}", keys[n]);
+                                let _ = writeln!(lock(&bad_out), "{fingerprint} {} {why}", keys[n]);
                                 lock(&state).2 += 1;
                                 rest = after;
                             }
@@ -125,6 +118,21 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         times.iter().sum::<f64>() / 1e3
     );
     Ok(())
+}
+
+/// Collects keys recorded with the current translator settings and driver.
+/// Workers retry failures from an older fingerprint or an unversioned log.
+fn recorded_keys<'a>(records: &'a str, fingerprint: &str) -> HashSet<&'a str> {
+    records
+        .lines()
+        .filter_map(|line| {
+            let (of, rest) = line.split_once(' ')?;
+            if of != fingerprint {
+                return None;
+            }
+            rest.split_ascii_whitespace().next()
+        })
+        .collect()
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -207,4 +215,21 @@ fn make(dir: &Path, these: &str) -> Result<()> {
     // Without what a run's end does (nothing to save, the host's threads).
     let _ = out.flush();
     std::process::exit(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warm_results_follow_the_translator_and_driver() {
+        let records = "current crashed exit code: 101\n\
+                       current finished\n\
+                       previous slow timed out\n\
+                       legacy-key exit code: 101\n\
+                       current\n";
+        assert_eq!(recorded_keys(records, "current"), HashSet::from(["crashed", "finished"]));
+        assert_eq!(recorded_keys(records, "previous"), HashSet::from(["slow"]));
+        assert!(recorded_keys(records, "new").is_empty());
+    }
 }
