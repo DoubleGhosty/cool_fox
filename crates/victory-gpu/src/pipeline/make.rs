@@ -196,13 +196,18 @@ impl Pending {
     }
 
     fn make(&self) {
+        self.make_or_wait(None);
+    }
+
+    /// [`Pending::make`], waiting for another thread that makes it only until `until`.
+    fn make_or_wait(&self, until: Option<Instant>) {
         let _ = self.began.set(Instant::now());
-        self.make_with(|| {
+        self.make_until(|| {
             let began = Instant::now();
             let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());
             super::library::note_time(&self.key, began.elapsed().as_millis() as u64);
             made
-        });
+        }, until);
     }
 
     /// Makes it with `build` unless made, or waits for the thread making it until it is made
@@ -211,13 +216,26 @@ impl Pending {
     /// unwinding) would hold that for good, and every later caller (a dispatch waiting for
     /// its compute pipeline, on the title's own thread) would wait for ever.
     fn make_with(&self, build: impl FnOnce() -> Option<HostPipeline>) {
+        self.make_until(build, None);
+    }
+
+    /// [`Pending::make_with`], waiting for another thread that makes it only until `until`.
+    fn make_until(&self, build: impl FnOnce() -> Option<HostPipeline>, until: Option<Instant>) {
         if self.made.get().is_none() {
             if self.building.swap(true, Ordering::AcqRel) {
                 let (lock, done) = &DONE;
                 let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
                 while self.made.get().is_none() && !self.failed.load(Ordering::Acquire) {
+                    let mut step = Duration::from_millis(50);
+                    if let Some(until) = until {
+                        let left = until.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            break;
+                        }
+                        step = step.min(left);
+                    }
                     // (timed: a notification may come between the test and the wait)
-                    held = done.wait_timeout(held, Duration::from_millis(50)).unwrap_or_else(|e| e.into_inner()).0;
+                    held = done.wait_timeout(held, step).unwrap_or_else(|e| e.into_inner()).0;
                 }
                 return;
             }
@@ -347,11 +365,27 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     if age_at_request.is_some() {
         start(p, REQUESTED);
         if p.required_initialization || (p.graphics.is_none() && compute_waits()) {
-            // OnceLock waits for a worker already compiling this pipeline,
-            // or compiles it here if workers have not taken it yet. The
-            // ordinary shared frame budget cannot discard a one-time write
-            // or a compute dispatch.
-            p.make();
+            // Waits for a worker already making this pipeline, or makes it
+            // here if no worker has taken it yet. The ordinary shared frame
+            // budget cannot discard a one-time write or a compute dispatch,
+            // but the wait for another thread ends with the frame's
+            // compute budget ([`compute_wait_until`]).
+            let until = compute_wait_until(crate::frame::current());
+            let began = Instant::now();
+            p.make_or_wait(until);
+            if p.made.get().is_none() && !p.failed.load(Ordering::Relaxed) {
+                static SAID: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+                if SAID.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().insert(p.key.clone()) {
+                    tracing::warn!(
+                        pipeline = %hashes(p),
+                        names = ?names(p),
+                        waited_ms = began.elapsed().as_millis() as u64,
+                        "a dispatch went without its compute pipeline, still being made, at the end of the frame's \
+                         compute wait (VICTORY_PIPELINE_COMPUTE_WAIT_MS; 0: no end): the title's watchdog ends \
+                         the run after 30 s without a frame"
+                    );
+                }
+            }
         } else {
             wait(p, crate::frame::current());
         }
@@ -374,6 +408,47 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
             "persistent initialization pipeline resolved before its first dispatch");
     }
     p.made.get()?.as_ref()
+}
+
+/// How long the dispatches of one frame may wait for compute pipelines other threads are
+/// making, all together: `VICTORY_PIPELINE_COMPUTE_WAIT_MS`, 8 s by default; 0 waits
+/// without end (as before). The title ends a run whose frames stop for 30 s (a write to 0 at
+/// +0x23cf683, issue #39): a dispatch that waited for a pipeline vkd3d-proton took minutes
+/// over held its frame that long (`CS_Prop_BatchNoCull`, first bound 30 s before the end).
+fn compute_wait_budget() -> Option<Duration> {
+    static BUDGET: OnceLock<Option<Duration>> = OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let millis = std::env::var("VICTORY_PIPELINE_COMPUTE_WAIT_MS").ok().and_then(|v| v.trim().parse::<u64>().ok());
+        compute_budget_of(millis)
+    })
+}
+
+fn compute_budget_of(millis: Option<u64>) -> Option<Duration> {
+    match millis {
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => Some(Duration::from_secs(8)),
+    }
+}
+
+/// Until when a dispatch of frame `frame` waits for its compute pipeline ([`compute_wait_budget`]):
+/// the budget from the frame's first such wait, shared by every wait of the frame, so that
+/// waits for several pipelines do not add up. None: without end.
+fn compute_wait_until(frame: u64) -> Option<Instant> {
+    let budget = compute_wait_budget()?;
+    static FIRST: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
+    Some(frame_deadline(&FIRST, frame, Instant::now(), budget))
+}
+
+fn frame_deadline(first: &Mutex<Option<(u64, Instant)>>, frame: u64, now: Instant, budget: Duration) -> Instant {
+    let mut first = first.lock().unwrap_or_else(|e| e.into_inner());
+    match *first {
+        Some((f, at)) if f == frame => at + budget,
+        _ => {
+            *first = Some((frame, now));
+            now + budget
+        }
+    }
 }
 
 /// Whether a dispatch waits for its compute pipeline until it is made,
@@ -1105,6 +1180,48 @@ mod tests {
                 assert!(!p.failed.load(Ordering::Acquire));
             }
         }
+    }
+
+    /// The waits of one frame share its compute budget, from its first wait; a new frame
+    /// gets a new one; 0 is no end and unset 8 s.
+    #[test]
+    fn the_compute_waits_of_a_frame_share_one_deadline() {
+        assert_eq!(compute_budget_of(None), Some(Duration::from_secs(8)));
+        assert_eq!(compute_budget_of(Some(0)), None);
+        assert_eq!(compute_budget_of(Some(250)), Some(Duration::from_millis(250)));
+        let first = Mutex::new(None);
+        let t0 = Instant::now();
+        let budget = Duration::from_secs(8);
+        let d = frame_deadline(&first, 7, t0, budget);
+        assert_eq!(d, t0 + budget);
+        assert_eq!(frame_deadline(&first, 7, t0 + Duration::from_secs(5), budget), d, "same frame, same end");
+        let t1 = t0 + Duration::from_secs(9);
+        assert_eq!(frame_deadline(&first, 8, t1, budget), t1 + budget, "the next frame its own");
+    }
+
+    /// A caller waiting for another thread's making gives up at its deadline, and the
+    /// pipeline is left being made, not failed.
+    #[test]
+    fn a_wait_for_another_threads_making_ends_at_its_deadline() {
+        let p = Arc::new(Pending::new(Vec::new(), None));
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let maker = p.clone();
+        let worker = std::thread::spawn(move || maker.make_with(|| {
+            gate.recv().unwrap();
+            None
+        }));
+        let started = Instant::now();
+        while !p.building.load(Ordering::Acquire) && started.elapsed() < Duration::from_secs(10) {
+            std::thread::yield_now();
+        }
+        let began = Instant::now();
+        p.make_until(|| panic!("the waiter must not make it too"), Some(began + Duration::from_millis(200)));
+        let waited = began.elapsed();
+        assert!(waited >= Duration::from_millis(190) && waited < Duration::from_secs(5), "{waited:?}");
+        assert!(p.made.get().is_none() && !p.failed.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(p.made.get().is_some());
     }
 
     #[test]
