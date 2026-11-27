@@ -1189,6 +1189,8 @@ struct Resource {
 pub(crate) struct HostTexture {
     pub(crate) texture: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
     pub(crate) state: std::sync::atomic::AtomicU32,
+    /// Immutable mip-zero UAV used by the ambient march pass, made only when bound.
+    march_uav: std::sync::OnceLock<windows::Win32::Graphics::Direct3D12::ID3D12DescriptorHeap>,
     /// The bytes the host gives it.
     bytes: u64,
     /// Whether its contents come from title memory ([`fills`]): counted in
@@ -2375,6 +2377,39 @@ fn host_bytes(texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource) ->
 
 #[cfg(windows)]
 impl HostTexture {
+    /// The march clamp has a fixed format and subresource. A recorded list can
+    /// be submitted repeatedly, so its slot is never rewritten for another copy.
+    pub(crate) fn march_uav(
+        &self,
+        device: &windows::Win32::Graphics::Direct3D12::ID3D12Device,
+    ) -> windows::core::Result<&windows::Win32::Graphics::Direct3D12::ID3D12DescriptorHeap> {
+        use windows::Win32::Graphics::{Direct3D12::*, Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT};
+        if let Some(view) = self.march_uav.get() {
+            return Ok(view);
+        }
+        let desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: DXGI_FORMAT_R16G16B16A16_FLOAT,
+            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_UAV { MipSlice: 0, PlaneSlice: 0 },
+            },
+        };
+        // SAFETY: the live texture has the clamp's RGBA16F format and allows UAVs.
+        let heap: ID3D12DescriptorHeap = unsafe {
+            let heap: ID3D12DescriptorHeap = device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                NumDescriptors: 1,
+                Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                NodeMask: 0,
+            })?;
+            device.CreateUnorderedAccessView(&self.texture, None::<&ID3D12Resource>, Some(&desc),
+                heap.GetCPUDescriptorHandleForHeapStart());
+            heap
+        };
+        // Concurrent first recordings may each create a heap. Only the published one is bound.
+        Ok(self.march_uav.get_or_init(|| heap))
+    }
+
     pub(crate) fn flags(&self) -> u32 {
         self.flags
     }
@@ -2389,6 +2424,7 @@ impl HostTexture {
         HostTexture {
             texture,
             state: std::sync::atomic::AtomicU32::new(state),
+            march_uav: Default::default(),
             bytes,
             filled: false,
             tiled: None,
@@ -2414,6 +2450,7 @@ impl HostTexture {
         HostTexture {
             texture,
             state: std::sync::atomic::AtomicU32::new(state),
+            march_uav: Default::default(),
             bytes: 0,
             filled: false,
             tiled: Some(tiled),
@@ -5025,3 +5062,6 @@ float4 lit() : SV_Target { return 1.0; }
         assert!(!twin_room(65_536));
     }
 }
+
+#[cfg(all(test, windows))]
+mod march_view_tests;
