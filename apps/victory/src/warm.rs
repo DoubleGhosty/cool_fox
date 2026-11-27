@@ -70,6 +70,7 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     );
     let chunks: Vec<&[usize]> = all.chunks(AT_ONCE).collect();
     let next = AtomicUsize::new(0);
+    let failure = Mutex::new(None);
     let state = Mutex::new((Vec::<f64>::new(), 0usize, 0usize));
     let done_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(&done_file)?);
     // (Read back by the runs: these are made beside the others, not before.)
@@ -79,9 +80,12 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         for _ in 0..jobs.min(chunks.len()) {
             s.spawn(|| {
                 while let Some(&chunk) = chunks.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    if lock(&failure).is_some() {
+                        return;
+                    }
                     let mut rest = chunk;
                     while !rest.is_empty() {
-                        let (made, ended) = child(rest, |n, ms, there| {
+                        let result = child(rest, |n, ms, there| {
                             if ms >= SLOW_MS {
                                 let _ = writeln!(lock(&slow_out), "\n{} {ms:.0}", keys[n]);
                             }
@@ -95,7 +99,14 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
                             drop(state);
                             let _ = writeln!(lock(&done_out), "{fingerprint} {}", keys[n]);
                         });
-                        rest = &rest[made.min(rest.len())..];
+                        let (made, ended) = match result {
+                            Ok(done) => done,
+                            Err(e) => {
+                                lock(&failure).get_or_insert(e);
+                                return;
+                            }
+                        };
+                        rest = &rest[made..];
                         match (ended, rest.split_first()) {
                             (Some(why), Some((&n, after))) => {
                                 // The one it was at.
@@ -124,15 +135,85 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         times.last().copied().unwrap_or(0.0),
         times.iter().sum::<f64>() / 1e3
     );
-    Ok(())
+    match failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+#[derive(Default)]
+struct Progress {
+    made: usize,
+    active: bool,
+}
+
+impl Progress {
+    fn record(&mut self, these: &[usize], line: &str) -> Result<Option<(usize, f64, bool)>> {
+        let mut words = line.split_ascii_whitespace();
+        let kind = match words.next() {
+            Some(kind @ ("at" | "made")) => kind,
+            _ => return Ok(None),
+        };
+        let n: usize = words.next().context("missing warm worker index")?.parse()?;
+        anyhow::ensure!(
+            these.get(self.made) == Some(&n),
+            "unexpected warm worker index {n}"
+        );
+        if kind == "at" {
+            anyhow::ensure!(
+                !self.active && words.next().is_none(),
+                "invalid warm worker start for {n}"
+            );
+            self.active = true;
+            return Ok(None);
+        }
+        let ms: f64 = words
+            .next()
+            .context("missing warm worker duration")?
+            .parse()?;
+        let there = match words.next() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => anyhow::bail!("invalid warm worker result for {n}"),
+        };
+        anyhow::ensure!(
+            self.active && ms.is_finite() && ms >= 0.0 && words.next().is_none(),
+            "invalid warm worker completion for {n}"
+        );
+        self.active = false;
+        self.made += 1;
+        Ok(Some((n, ms, there)))
+    }
+
+    fn finish(self, count: usize, failure: Option<String>) -> Result<(usize, Option<String>)> {
+        if let Some(reason) = failure {
+            if self.active {
+                // A failed worker identified exactly which pipeline it was making.
+                return Ok((self.made, Some(reason)));
+            }
+            anyhow::bail!(
+                "warm worker ended between pipelines after {} of {count}: {reason}",
+                self.made
+            );
+        }
+        anyhow::ensure!(
+            self.made == count,
+            "warm worker exited successfully after reporting {} of {count} pipelines",
+            self.made
+        );
+        Ok((self.made, None))
+    }
+}
+
 /// Has a process make `these`; how many it made, and how it ended if not well.
-fn child(these: &[usize], mut each: impl FnMut(usize, f64, bool)) -> (usize, Option<String>) {
+fn child(
+    these: &[usize],
+    mut each: impl FnMut(usize, f64, bool),
+) -> Result<(usize, Option<String>)> {
     let list: Vec<String> = these.iter().map(usize::to_string).collect();
     let spawned = std::env::current_exe().and_then(|exe| {
         use std::os::windows::process::CommandExt;
@@ -145,13 +226,17 @@ fn child(these: &[usize], mut each: impl FnMut(usize, f64, bool)) -> (usize, Opt
             .creation_flags(IDLE_PRIORITY_CLASS)
             .spawn()
     });
-    let Ok(mut process) = spawned else { return (these.len(), None) };
-    let Some(out) = process.stdout.take() else { return (these.len(), None) };
+    let mut process = spawned.context("starting the pipeline warm worker")?;
+    let Some(out) = process.stdout.take() else {
+        let _ = process.kill();
+        let _ = process.wait();
+        anyhow::bail!("warm worker has no output pipe");
+    };
     let process = Mutex::new(process);
     let (heard, over) = (Mutex::new(Instant::now()), AtomicBool::new(false));
     let hung = AtomicBool::new(false);
-    let mut made = 0;
-    std::thread::scope(|s| {
+    let mut progress = Progress::default();
+    let read = std::thread::scope(|s| {
         s.spawn(|| {
             while !over.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(500));
@@ -162,30 +247,35 @@ fn child(these: &[usize], mut each: impl FnMut(usize, f64, bool)) -> (usize, Opt
                 }
             }
         });
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            *lock(&heard) = Instant::now();
-            let mut words = line.split(' ');
-            if words.next() == Some("made")
-                && let (Some(n), Some(ms), Some(there)) = (words.next(), words.next(), words.next())
-                && let (Ok(n), Ok(ms)) = (n.parse(), ms.parse())
-            {
-                made += 1;
-                each(n, ms, there == "1");
+        let read = (|| -> Result<()> {
+            for line in BufReader::new(out).lines() {
+                let line = line.context("reading warm worker output")?;
+                *lock(&heard) = Instant::now();
+                if let Some((n, ms, there)) = progress.record(these, &line)? {
+                    each(n, ms, there);
+                }
             }
+            Ok(())
+        })();
+        if read.is_err() {
+            let _ = lock(&process).kill();
         }
         over.store(true, Ordering::Relaxed);
+        read
     });
-    let status = lock(&process).wait();
-    let well = status.as_ref().is_ok_and(|s| s.success());
-    if well {
-        return (these.len(), None);
+    let status = lock(&process)
+        .wait()
+        .context("waiting for the pipeline warm worker")?;
+    read?;
+    if status.success() {
+        return progress.finish(these.len(), None);
     }
     let why = if hung.load(Ordering::Relaxed) {
         format!("hung for {} s", LONGEST.as_secs())
     } else {
-        status.map_or_else(|e| e.to_string(), |s| format!("{s}"))
+        status.to_string()
     };
-    (made, Some(why))
+    progress.finish(these.len(), Some(why))
 }
 
 /// What such a process does.
@@ -207,4 +297,56 @@ fn make(dir: &Path, these: &str) -> Result<()> {
     // Without what a run's end does (nothing to save, the host's threads).
     let _ = out.flush();
     std::process::exit(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_failed_worker_with_a_current_pipeline_marks_it_bad() {
+        let chunk = [9, 2, 7];
+        let mut p = Progress::default();
+        p.record(&chunk, "at 9").unwrap();
+        assert_eq!(
+            p.record(&chunk, "made 9 3.00 0").unwrap(),
+            Some((9, 3.0, false))
+        );
+        assert!(p.finish(3, Some("exit 101".into())).is_err());
+
+        let mut p = Progress::default();
+        p.record(&chunk, "at 9").unwrap();
+        p.record(&chunk, "made 9 1.00 1").unwrap();
+        p.record(&chunk, "at 2").unwrap();
+        assert_eq!(
+            p.finish(3, Some("exit 101".into())).unwrap(),
+            (1, Some("exit 101".into()))
+        );
+    }
+
+    #[test]
+    fn incomplete_or_out_of_order_results_leave_the_rest_retryable() {
+        let chunk = [7, 3];
+        assert!(Progress::default().finish(2, None).is_err());
+        assert!(
+            Progress::default()
+                .finish(2, Some("exit 1".into()))
+                .is_err()
+        );
+        let mut p = Progress::default();
+        assert!(p.record(&chunk, "made 7 0.1 1").is_err());
+        assert!(p.record(&chunk, "at 3").is_err());
+        assert!(p.record(&chunk, "diagnostic output").unwrap().is_none());
+        p.record(&chunk, "at 7").unwrap();
+        assert!(p.record(&chunk, "made 3 0.0 0").is_err());
+        assert!(p.record(&chunk, "made 7 0.0 ?").is_err());
+        assert!(p.finish(2, None).is_err());
+        let mut p = Progress::default();
+        for n in chunk {
+            p.record(&chunk, &format!("at {n}")).unwrap();
+            p.record(&chunk, &format!("made {n} 0.00 0")).unwrap();
+        }
+        assert_eq!(p.finish(2, None).unwrap(), (2, None));
+    }
+
 }
