@@ -87,6 +87,9 @@ pub(crate) fn allow_staging_growth(bake: bool) -> bool {
     if now < RETRY_UPLOAD_AT.load(Ordering::Relaxed) {
         return false;
     }
+    if pressured() && !bake {
+        return false;
+    }
     has_growth_reserve(sample_commit(now), bake)
 }
 
