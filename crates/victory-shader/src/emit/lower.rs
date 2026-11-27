@@ -4667,13 +4667,10 @@ impl<'a> Lower<'a> {
                 self.meet_refuse = Some("a half-meet where not every lane runs");
             }
             block
-        } else if block != self.cur || self.s.m.is_terminated(block) {
-            // A per-wave wait splits the block and moves the lowering cursor.
-            // A deferred exchange cannot replace this predecessor's existing branch.
-            self.meet_refuse
-                .get_or_insert("a deferred exchange needs a per-wave meet in a closed block");
-            block
         } else {
+            // A deferred exchange may meet in a block that has already branched on (the
+            // entry, an earlier block's tail): `half_meet_at` moves that branch to the
+            // meet's continuation and leaves the lowering cursor where it was.
             self.half_meet_at(block)
         };
         if block == self.cur {
@@ -4699,6 +4696,12 @@ impl<'a> Lower<'a> {
         {
             self.half_meet_count += 1;
         }
+        // A value made where it was defined and asked across the halves later meets in a
+        // block that has already branched on (the entry, an earlier block's tail): its
+        // branch moves to the meet's continuation, and the lowering goes on where it was.
+        let resume = self.cur;
+        let block = self.s.m.follow(block);
+        let left = self.s.m.take_term(block);
         let thread = self.console_thread();
         let sixty3 = self.s.m.i32(63);
         let in_wave = self.s.m.bin(block, Bin::And, thread, sixty3);
@@ -4765,6 +4768,10 @@ impl<'a> Lower<'a> {
         let after = self.cur;
         // The rest of this instruction was aimed at the block the meet closed.
         self.s.m.continues(block, after);
+        if let Some(t) = left {
+            self.s.m.terminate(after, t);
+        }
+        self.cur = if self.s.m.follow(resume) == after { after } else { resume };
         after
     }
 

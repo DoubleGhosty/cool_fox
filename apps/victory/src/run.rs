@@ -208,6 +208,10 @@ pub fn run(
     victory_hle::runtime::use_console_timers();
     #[cfg(feature = "diagnostics")]
     diagnostics(&image, &cfg);
+    // Outside the diagnostics too: a title's hang watchdog fires while the
+    // first world frames wait for their compute pipelines.
+    #[cfg(not(feature = "diagnostics"))]
+    poke(image.base(), image.info().size_of_image as usize);
     let late = LateDlls {
         host: resolver.host.clone(),
         title_dir: title_dir.to_owned(),
@@ -329,8 +333,10 @@ fn timers(base: usize, size: usize) {
 /// each title+rva twice a second. A title that ends itself when its main
 /// loop has not ticked for a while (Grand Theft Auto VI: 30 s) runs on
 /// through slower frames with its tick flag poked. The address must be
-/// writable title data.
-#[cfg(all(windows, feature = "diagnostics"))]
+/// writable title data. Grand Theft Auto VI's watchdog (title+0x2215a60)
+/// starts its count again on every pass while title+0x71b6330 has bit 0 set:
+/// `VICTORY_POKE=71b6330:1`.
+#[cfg(windows)]
 fn poke(base: usize, size: usize) {
     let Ok(list) = std::env::var("VICTORY_POKE") else {
         return;

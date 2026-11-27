@@ -412,7 +412,8 @@ impl Module {
         }
     }
 
-    fn follow(&self, mut block: usize) -> usize {
+    /// The block that holds what is aimed at `block` now (itself unless a meet closed it).
+    pub(crate) fn follow(&self, mut block: usize) -> usize {
         for _ in 0..64 {
             match self.redirect.get(&block) {
                 Some(&next) if next != block => block = next,
@@ -425,6 +426,33 @@ impl Module {
     /// Instructions aimed at `from` after this belong in `to` (a meet closed `from`).
     pub fn continues(&mut self, from: usize, to: usize) {
         self.redirect.insert(from, to);
+    }
+
+    /// The terminator of the block that holds what is aimed at `block`, taken off it.
+    pub(crate) fn take_term(&mut self, block: usize) -> Option<Term> {
+        let block = self.follow(block);
+        self.blocks[block].term.take()
+    }
+
+    /// A join's value from a block a meet closed comes from its continuation: the closed
+    /// block branches into the meet, and the continuation holds the branch that leaves.
+    pub(crate) fn settle_meets(&mut self) {
+        if self.redirect.is_empty() {
+            return;
+        }
+        for b in 0..self.blocks.len() {
+            for n in 0..self.blocks[b].phis.len() {
+                let p = self.blocks[b].phis[n] as usize;
+                let Op::Phi(incoming) = &self.insts[p].op else {
+                    continue;
+                };
+                if incoming.iter().all(|&(_, from)| self.follow(from) == from) {
+                    continue;
+                }
+                let settled = incoming.iter().map(|&(v, from)| (v, self.follow(from))).collect();
+                self.insts[p].op = Op::Phi(settled);
+            }
+        }
     }
 
     fn push(&mut self, block: usize, ty: Ty, op: Op) -> V {
@@ -527,7 +555,17 @@ impl Module {
         self.blocks[block].term.is_some()
     }
 
+    /// A terminator aimed at a block a meet closed belongs in its
+    /// continuation, as instructions do ([`Module::continues`]): the closed
+    /// block already branches into the meet, and replacing that branch left
+    /// the meet's blocks (and the values made there) unreached.
     pub fn terminate(&mut self, block: usize, t: Term) {
+        let block = self.follow(block);
+        if let Some(old) = self.blocks[block].term
+            && std::env::var_os("VICTORY_OPT_CHECK").is_some()
+        {
+            eprintln!("VICTORY_OPT_CHECK: block {block}: terminator {old:?} replaced by {t:?}");
+        }
         self.blocks[block].term = Some(t);
     }
 
@@ -950,10 +988,21 @@ impl Module {
                 V::Inst(i) => {
                     let id = ids[i as usize];
                     if id == u32::MAX {
-                        funcs.saturating_sub(1)
-                    } else {
-                        id
+                        let inst = &self.insts[i as usize];
+                        let home = self.blocks.iter().position(|b| {
+                            b.phis.contains(&i) || b.body.contains(&i)
+                        });
+                        panic!(
+                            "use of a void value: inst {i} void={} live={} block={home:?} \
+                             laid_out={:?} folded={:?} op={:?}",
+                            self.is_void(inst.ty),
+                            live[i as usize],
+                            home.map(|b| pos[b] != u64::MAX),
+                            home.map(|b| fold[b].is_some()),
+                            inst.op,
+                        );
                     }
+                    id
                 }
             }
         };
@@ -1044,8 +1093,15 @@ impl Module {
                         r.clear();
                         r.push(u64::from(inst.ty.0));
                         for &(v, b) in incoming {
+                            // An incoming from a block no branch reaches: that
+                            // block is not written (nor are its values), so it
+                            // is no predecessor here.
+                            let pred = from(b);
+                            if pred == u64::MAX {
+                                continue;
+                            }
                             r.push(signed(i64::from(inst_id) - i64::from(abs(v))));
-                            r.push(from(b));
+                            r.push(pred);
                         }
                         w.record(16, &r);
                     }
@@ -1385,6 +1441,73 @@ mod tests {
         assert!(live[ids(read)] && live[ids(sum)]);
         assert!(!live[ids(unread)] && !live[ids(cyc_a)] && !live[ids(cyc_b)]);
         assert_eq!(live, live_by_passes(&m));
+    }
+
+    #[test]
+    fn phi_incoming_from_an_unreachable_block_is_dropped() {
+        // A block no branch reaches is not written, so a value made there
+        // has no id; a phi's incoming from it must be left out, not written
+        // (it panicked with "use of a void value").
+        let build = |with_dead: bool| {
+            let mut m = Module::default();
+            let i32t = m.int(32);
+            let (entry, dead, join) = (m.new_block(), m.new_block(), m.new_block());
+            let (a, b) = (m.i32(1), m.i32(2));
+            m.terminate(entry, Term::Br(join));
+            let x = m.bin(dead, Bin::Add, a, b);
+            m.terminate(dead, Term::Br(join));
+            let p = m.phi(join, i32t);
+            let mut incoming = vec![(a, entry)];
+            if with_dead {
+                incoming.push((x, dead));
+            }
+            m.set_phi(p, incoming);
+            let _ = m.bin(join, Bin::Add, p, b);
+            m.terminate(join, Term::Ret);
+            m
+        };
+        assert_eq!(build(true).write(), build(false).write());
+    }
+
+    #[test]
+    fn a_meet_in_a_block_that_branched_on_keeps_its_branch() {
+        // `entry` branches to `next` before a value made in it is asked across
+        // the halves: the meet that splits `entry` must move that branch to its
+        // continuation, and `next`'s join must name the continuation.
+        let mut m = Module::default();
+        let i32t = m.int(32);
+        let (entry, next) = (m.new_block(), m.new_block());
+        let (a, b) = (m.i32(1), m.i32(2));
+        let x = m.bin(entry, Bin::Add, a, b);
+        m.terminate(entry, Term::Br(next));
+        let p = m.phi(next, i32t);
+        m.set_phi(p, vec![(x, entry)]);
+        let _ = m.bin(next, Bin::Add, p, b);
+        m.terminate(next, Term::Ret);
+        // The meet, as `half_meet_at` builds it: a wait block, then the continuation.
+        let left = m.take_term(entry);
+        assert!(matches!(left, Some(Term::Br(t)) if t == next));
+        let (wait, after) = (m.new_block(), m.new_block());
+        m.terminate(entry, Term::Br(wait));
+        m.terminate(wait, Term::Br(after));
+        m.continues(entry, after);
+        m.terminate(after, left.unwrap());
+        let y = m.bin(entry, Bin::Add, x, b); // aimed at `entry`: goes to `after`
+        assert_eq!(m.follow(entry), after);
+        let V::Inst(yi) = y else { unreachable!() };
+        assert!(m.blocks[after].body.contains(&yi));
+        m.settle_meets();
+        let Op::Phi(incoming) = &m.insts[match p {
+            V::Inst(i) => i as usize,
+            _ => unreachable!(),
+        }]
+        .op
+        else {
+            unreachable!()
+        };
+        assert_eq!(incoming, &vec![(x, after)]);
+        assert!(m.reached().iter().all(|&r| r));
+        assert!(!m.write().is_empty());
     }
 
     #[test]
