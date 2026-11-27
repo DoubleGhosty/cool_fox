@@ -4,9 +4,16 @@
 # -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}
+# -Record       writes down the pipelines the title creates (VICTORY_PIPELINE_BOOK=1), for -Warm
+# -Warm         with the same settings, makes the pipelines earlier runs drew with (victory warm --used), no title
+# -Shaders      with the same settings, translates these shader archives (victory shaders <paths>), no title
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
+[CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
-    [Parameter(Mandatory)][string]$Exe,
+    [Parameter(Mandatory, ParameterSetName = 'Run')][string]$Exe,
+    [Parameter(Mandatory, ParameterSetName = 'Warm')][switch]$Warm,
+    [Parameter(Mandatory, ParameterSetName = 'Shaders')][string[]]$Shaders,
+    [switch]$Record,
     [switch]$Safe,
     [switch]$RayTracing,
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
@@ -24,15 +31,23 @@ if ($Safe) {
     $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
 }
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
+if ($Record) { $settings.VICTORY_PIPELINE_BOOK = '1' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
 if (-not (Test-Path $victory)) { Write-Host "No $victory. Build it first (README.md)."; return }
-if (-not (Test-Path $Exe)) { Write-Host "No $Exe."; return }
+if ($PSCmdlet.ParameterSetName -eq 'Run' -and -not (Test-Path $Exe)) { Write-Host "No $Exe."; return }
 # (Other settings left over in this window go; where your files are stays.)
 $paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR'
 Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
-$Exe = (Resolve-Path $Exe).Path
+if ($Shaders) { $Shaders = @((Resolve-Path $Shaders -ErrorAction Stop).Path) }
+if ($Exe) { $Exe = (Resolve-Path $Exe).Path }
 Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
-try { & $victory run $Exe --execute } finally { Pop-Location }
+try {
+    switch ($PSCmdlet.ParameterSetName) {
+        'Warm' { & $victory warm --used }
+        'Shaders' { & $victory shaders @Shaders }
+        default { & $victory run $Exe --execute }
+    }
+} finally { Pop-Location }

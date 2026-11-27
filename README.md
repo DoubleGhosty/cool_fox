@@ -77,6 +77,12 @@ target\diag\victory.exe shaders <archive_paths>
 target\diag\victory.exe warm --used
 ```
 
+`warm` has nothing to make until one run has written the pipelines down
+(`scripts\play.ps1 -Exe <path> -Record`). Some switches are part of the shader
+cache's key, so both commands should see the ones the runs do: run them as
+`scripts\play.ps1 -Warm` and `scripts\play.ps1 -Shaders <archive_paths>`,
+with the same `-Safe`, `-RayTracing` and `-More` as play.
+
 Commands, debugging switches, and technical notes are documented in [docs/README-fxceless.md](docs/README-fxceless.md) and [docs/findings.md](docs/findings.md). Every `VICTORY_...` environment variable is also documented where it is read in the source.
 
 ---
