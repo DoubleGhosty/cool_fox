@@ -455,14 +455,24 @@ thread_local! {
     static SHADER: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
-/// `eprintln!` for the `VICTORY_WAVE_WHY` lines, with the shader's hash in front.
+/// The `VICTORY_WAVE_WHY` lines, with the shader's hash in front.
+///
+/// Through the log when the program has one (so `VICTORY_LOG_FILE` keeps them: under Proton
+/// nothing written to stderr reaches the terminal), at warn so that the launchers'
+/// `VICTORY_LOG=warn` shows them; they come only with `VICTORY_WAVE_WHY` set. To stderr where
+/// there is no log (the tests).
 macro_rules! wave_why {
     ($($arg:tt)*) => {
         $crate::emit::SHADER.with_borrow(|hash| {
-            if hash.is_empty() {
-                eprintln!($($arg)*)
+            let line = if hash.is_empty() {
+                format!($($arg)*)
             } else {
-                eprintln!("[{hash}] {}", format_args!($($arg)*))
+                format!("[{hash}] {}", format_args!($($arg)*))
+            };
+            if tracing::dispatcher::has_been_set() {
+                tracing::warn!(target: "victory_shader::wave_why", "{line}");
+            } else {
+                eprintln!("{line}");
             }
         })
     };
@@ -1208,6 +1218,41 @@ fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod wave_why_tests {
+    use std::sync::{Arc, Mutex};
+
+    /// With a log, the `VICTORY_WAVE_WHY` lines go to it (and so to `VICTORY_LOG_FILE`), with
+    /// the shader's hash in front.
+    #[test]
+    fn wave_why_lines_reach_the_log_with_their_shader() {
+        let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = seen.clone();
+        let log = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || {
+                struct Into(Arc<Mutex<Vec<u8>>>);
+                impl std::io::Write for Into {
+                    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                        self.0.lock().unwrap().extend_from_slice(b);
+                        Ok(b.len())
+                    }
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        Ok(())
+                    }
+                }
+                Into(writer.clone())
+            })
+            .finish();
+        tracing::subscriber::with_default(log, || {
+            super::with_shader("0123456789abcdef", || super::wave_why!("WAVE64-TEST {}", 7));
+        });
+        let text = String::from_utf8(seen.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("[0123456789abcdef] WAVE64-TEST 7"), "{text}");
+        assert!(text.contains("WARN"), "{text}");
+    }
 }
 
 #[cfg(test)]
