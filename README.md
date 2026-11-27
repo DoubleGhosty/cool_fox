@@ -79,6 +79,12 @@ $env:VICTORY_GAME_DIR = 'D:\path\to\your\title'
 .\Play-VIctory.cmd
 ```
 
+A live input report from a USB or Bluetooth DualSense at launch selects PlayStation
+button prompts and the controller diagram in Settings. A paired controller
+that is switched off uses the original Xbox artwork. VIctory reads the
+original package and stores its two UI files in the VIctory cache. Set
+`VICTORY_DUALSENSE_PROMPTS=0` for Xbox artwork or `1` to force PlayStation artwork.
+
 For AMD Radeon GPUs (RX 7000+, 16 GB+ VRAM) with all renderer ports enabled:
 
 ```powershell
@@ -94,6 +100,7 @@ For 4 GB VRAM GPUs or low-memory systems:
 | Launcher | Target | Renderer Ports | Notes |
 |---|---|---|---|
 | `Play-VIctory.cmd` | NVIDIA + AMD, 8 GB+ | 6, 7 on; 1, 5 opt-in | Safe default for all GPUs |
+| `Play-VIctory-NVIDIA.cmd` | NVIDIA GeForce | 6, 7 on by default | 1080p 3D scene with a 4K interface, displayed in a window up to 1920×1080 |
 | `Play-VIctory-AMD.cmd` | AMD 16 GB+ | 1, 5, 6, 7 all on | Maximum performance; all ports from top community forks |
 | `Play-VIctory-4GB.cmd` | 4 GB VRAM | 6, 7 on; 1, 5 off | Series S profile, reduced card buffers |
 | `scripts\play.ps1` | Diagnostics | 6, 7 on; `-Safe` disables | Full logging; `-RayTracing` for RT |

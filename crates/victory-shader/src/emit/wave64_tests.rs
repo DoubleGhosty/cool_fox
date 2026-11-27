@@ -1277,15 +1277,20 @@ fn a_wave_wide_scc_branch_no_form_can_take_falls_back_to_the_per_lane_split() {
     let native = mask_scc_behind_a_kept_skip();
     let p = ir::build(&native.code, native.wave64, native.vgprs).expect("IR");
     assert!(ir::without_skips(&p, false).is_none(), "the skip is kept: the code after it reads s20");
-    let st = structure::structure(&p).expect("structure");
+    let st = structure::structure_with_scc(&p, &HashSet::new(), true).expect("structure");
     assert_eq!(st.wave_scc.len(), 1, "the branch on the mask's SCC is the wave's");
     assert!(structure::with_per_lane(|| structure::structure(&p)).expect("structure").wave_scc.is_empty());
     let res = resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resources");
     let io = io::raise(&p, &native).expect("io");
     let c = crate::Container { digest: [0; 16], version: (1, 0), parts: Vec::new() };
     let was = lower::TEST_HOST_WAVE.replace(Some(32));
-    let exact = super::emit_forms(&c, &native, &p, &st, &io, &res);
+    let exact = super::emit_forms(&c, &native, &p, &st, &io, &res, false);
     let shader = super::emit(&c, &native, &p, &st, &io, &res);
+    let per_lane = structure::with_per_lane(|| {
+        let st = structure::for_stage(&p, native.stage)?;
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
+        super::emit_forms(&c, &native, &p, &st, &io, &res, true)
+    });
     lower::TEST_HOST_WAVE.set(was);
     assert!(
         matches!(&exact, Err(ShaderError::Unsupported { what, .. }) if *what == lower::WAVE_WIDE_ELSEWHERE),
@@ -1293,6 +1298,7 @@ fn a_wave_wide_scc_branch_no_form_can_take_falls_back_to_the_per_lane_split() {
         exact.err()
     );
     let shader = shader.expect("split per lane, the program translates");
+    assert_eq!(shader.dxil, per_lane.expect("per-lane reference").dxil);
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone()).expect("DXIL validation");
     }
@@ -1311,6 +1317,74 @@ fn emit_nested_mask_scc(native: &NativeProgram, p: &ir::Program) -> HostShader {
     let normal = super::emit(&c, native, p, &st, &io, &res);
     lower::TEST_HOST_WAVE.set(was);
     normal.expect("the production Wave32 fallback must lower the program")
+}
+
+#[test]
+fn a_pixel_mask_branch_uses_the_structured_lane_predicate() {
+    let words = [
+        0x7e00_0281u32, // v_mov_b32 v0, 1
+        0x7d84_0081, // v_cmp_eq_u32 vcc, 1, v0
+        0x8792_7e6a, // s_and_b64 s[18:19], vcc, exec
+        0xbf84_0002, // s_cbranch_scc0 to the other value
+        0x7e00_0282, // v_mov_b32 v0, 2
+        0xbf82_0001, // s_branch to the export
+        0x7e00_0283, // v_mov_b32 v0, 3
+        0xf800_180f, 0, // exp mrt0, v0, v0, v0, v0 done vm
+        S_ENDPGM,
+    ];
+    let native = NativeProgram {
+        stage: HwStage::Ps,
+        wave64: true,
+        vgprs: 1,
+        io: StageIo::Ps { inputs: vec![], patches: vec![], input_addr: 0, db_shader_control: 0 },
+        layout: vec![],
+        used: vec![],
+        code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+    };
+    let p = ir::build(&native.code, native.wave64, native.vgprs).unwrap();
+    let st = structure::for_stage(&p, native.stage).unwrap();
+    let scc = p.blocks[0].insts.last().unwrap().read(ir::Reg::Scc).unwrap();
+    assert!(st.scc_some.contains_key(&scc));
+    assert!(st.wave_scc.is_empty(), "graphics branches must retain their per-lane edge facts");
+    lowered(&native, &p, &HashSet::new()).expect("a graphics branch needs no compute wave exchange");
+}
+
+#[test]
+fn scene_histogram_mask_exits_lower_for_groups_of_several_wave64s() {
+    for (digest, offset) in [
+        (0x6d0f7c4a_4b76b006_9d94a41c_1461e9b7_u128, 0x19c),
+        (0xb8d2f51f_aec434e3_fcc84124_4de3238d_u128, 0x1ec),
+    ] {
+        // native_of supplies three words. Put the exit at the offset for
+        // this kernel, with a synthetic body that only the remaining lanes run.
+        let mut words = vec![0xbf80_0000; offset / 4 - 3 - 4];
+        words.extend_from_slice(&[
+            0xbe90_047e, // s_mov_b64 s[16:17], exec
+            0xbe82_047e, // s_mov_b64 s[2:3], exec
+            0x7da6_0000, // v_cmpx_le_u32 exec, s0, v0
+            0x8a90_7e10, // s_andn2_b64 s[16:17], s[16:17], exec
+            0xbf84_0004, // s_cbranch_scc0 to the restore
+            0x87fe_1002, // s_and_b64 exec, s[2:3], s[16:17]
+            0x7e04_0281, // v_mov_b32 v2, 1
+            0x38 << 26 | 0x1c << 18,
+            0x80 << 24 | 2 << 16 | 2 << 8, // buffer_store_dword v2
+            0xbefe_0402, // s_mov_b64 exec, s[2:3]
+        ]);
+        let native = native_of(&words, true, 256);
+        let p = ir::build(&native.code, native.wave64, native.vgprs).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+        let mut c = crate::Container { digest: [0; 16], version: (1, 0), parts: Vec::new() };
+        assert!(super::histogram_loop_exit(&c, &p).is_none());
+        c.digest = digest.to_be_bytes();
+        let block = super::histogram_loop_exit(&c, &p).unwrap();
+        assert!(st.wave_scc.contains(&block));
+        let was = lower::TEST_HOST_WAVE.replace(Some(32));
+        let result = super::emit(&c, &native, &p, &st, &io, &res);
+        lower::TEST_HOST_WAVE.set(was);
+        result.expect("the masked histogram body must translate on Wave32");
+    }
 }
 
 #[test]
