@@ -28,8 +28,8 @@ rem Hair strands, simulation passes & accessories rendering
 if not defined VICTORY_HAIR set "VICTORY_HAIR=1"
 rem Ambient lighting, crease shading & volumetric air/fog march ceiling (prevents purple veil & window blowout)
 if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1"
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.5"
-if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=1.0"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.8"
+if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=0.8"
 if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=1.2,0.8"
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
 rem Memory trimming & VRAM management (prevents 99% RAM stall & NVMe pagefile thrashing)

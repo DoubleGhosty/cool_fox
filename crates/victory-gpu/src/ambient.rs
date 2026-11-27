@@ -278,7 +278,8 @@ void mean() {
     // followed at once, as a new room is.)
     float a = max(dot(now, LUMA), 1e-5), b = max(dot(was.rgb, LUMA), 1e-5);
     float share = (jump > 0.0 && max(a / b, b / a) > jump) ? 1.0 : follow;
-    cells[CELLS] = float4(was.a > 0.0 ? lerp(was.rgb, now, share) : now, 1.0);
+    float3 updated = was.a > 0.0 ? lerp(was.rgb, now, share) : now;
+    cells[CELLS] = float4(min(updated, 1.0), 1.0);
 }
 #endif
 
@@ -346,6 +347,7 @@ void clear_air(uint3 at : SV_DispatchThreadID) {
         float far = float(at.z) / float(d);
         cap = air * lerp(dot(cells[CELLS].rgb, LUMA), dot(seen_there, LUMA), far);
     }
+    cap = min(cap, 0.6);
     float3 c = scattered[at];
     // A NaN or infinity in the air is summed along every view ray through
     // it: black or white patches floating in the room (tested as in `keep`).
@@ -368,7 +370,8 @@ void clear_march(uint3 at : SV_DispatchThreadID) {
     float4 c = marched[at.xy];
     // (NaN or infinity: tested as in `keep`.)
     if (any((asuint(c.rgb) & 0x7f800000u) == 0x7f800000u)) { marched[at.xy] = float4(0.0, 0.0, 0.0, c.a); return; }
-    float cap = air * (constant > 0.0 ? constant : dot(cells[CELLS].rgb, LUMA));
+    float mean_luma = constant > 0.0 ? constant : dot(cells[CELLS].rgb, LUMA);
+    float cap = min(air * mean_luma, 0.35);
     float has = dot(c.rgb, LUMA);
     if (has > cap) marched[at.xy] = float4(c.rgb * (cap / has), c.a);
 }
