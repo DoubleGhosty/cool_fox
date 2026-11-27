@@ -410,7 +410,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float noise = frac(52.9829189 * frac(dot(float2(p), float2(0.06711056, 0.00583715))));
     if (strength > 0.0 && px >= 1.5 && c.z < 400.0) {
         float sum = 0.0;
-        const int N = 12;
+        const int N = 8;
         for (int i = 0; i < N; i++) {
             float a = i * 2.399963 + noise * 6.2831853;
             float2 o = float2(cos(a), sin(a)) * (sqrt((i + 0.5) / N) * px);

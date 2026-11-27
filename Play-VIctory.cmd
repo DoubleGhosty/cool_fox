@@ -21,8 +21,9 @@ if not exist "%runner%" (
   echo Extract the Windows release or run cargo build --release --locked -p victory. 1>&2
   exit /b 2
 )
-rem Resolution & Upscaler (1080p target avoids 4K fillrate choke on 8GB cards; upscaler 6 avoids FFX latency)
-if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1920x1080"
+rem Resolution & Upscaler (1664x936 output with 0.667 internal render scale cuts fillrate by >40% on 8GB cards; upscaler 6 avoids FFX latency)
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1664x936"
+if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.667"
 if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
 rem Hair strands, simulation passes & accessories rendering
 if not defined VICTORY_HAIR set "VICTORY_HAIR=1"
@@ -30,7 +31,7 @@ rem Ambient lighting, crease shading & volumetric air/fog march ceiling (prevent
 if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1"
 if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.8"
 if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=0.8"
-if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=1.2,0.8"
+if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=1.2,0.6"
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
 rem DirectStorage streaming & staging (accelerates geometry/wall streaming to eliminate missing cutscene walls)
 if not defined VICTORY_DSTORAGE_STAGING_MB set "VICTORY_DSTORAGE_STAGING_MB=512"
@@ -53,7 +54,7 @@ if not defined VICTORY_THIN set "VICTORY_THIN=1"
 if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=6"
 if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
 if not defined VICTORY_ASYNC_SUBMIT set "VICTORY_ASYNC_SUBMIT=1"
-if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=2"
+if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=4"
 if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
 if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=0"
 rem GPU buffer acceleration & pipelined relay
