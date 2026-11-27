@@ -32,6 +32,9 @@ if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.8"
 if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=0.8"
 if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=1.2,0.8"
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
+rem DirectStorage streaming & staging (accelerates geometry/wall streaming to eliminate missing cutscene walls)
+if not defined VICTORY_DSTORAGE_STAGING_MB set "VICTORY_DSTORAGE_STAGING_MB=512"
+if not defined VICTORY_DSTORAGE_WORKERS set "VICTORY_DSTORAGE_WORKERS=8"
 rem Memory trimming & VRAM management (prevents 99% RAM stall & NVMe pagefile thrashing)
 if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
 if not defined VICTORY_TEXTURE_KEEP set "VICTORY_TEXTURE_KEEP=2"
