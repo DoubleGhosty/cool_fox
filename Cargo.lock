@@ -740,6 +740,8 @@ name = "victory-shader"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
  "windows",
  "windows-sys",
  "zlib-rs",
