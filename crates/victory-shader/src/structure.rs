@@ -484,6 +484,16 @@ pub fn structure(program: &Program) -> Result<Structured, ShaderError> {
     structure_wide(program, &HashSet::new())
 }
 
+/// Graphics stages lower mask branches per lane. Analyse their edges that
+/// way as well, so descriptor tracking and instruction guards agree with DXIL.
+pub fn for_stage(program: &Program, stage: crate::native::HwStage) -> Result<Structured, ShaderError> {
+    if stage == crate::native::HwStage::Cs {
+        structure(program)
+    } else {
+        structure_with_scc(program, &HashSet::new(), false)
+    }
+}
+
 /// [`structure`], with the branches that close the blocks of `wide` kept as the console has
 /// them: one decision for the whole wave (`s_cbranch_execz` and `vccz`: taken when no lane's
 /// bit is set; `execnz` and `vccnz`: when some lane's is; SCC of a mask operation likewise,
@@ -493,10 +503,16 @@ pub fn structure(program: &Program) -> Result<Structured, ShaderError> {
 /// run as two host waves, which exchange that decision and can then meet (a group barrier)
 /// inside the branch.
 pub fn structure_wide(program: &Program, wide: &HashSet<usize>) -> Result<Structured, ShaderError> {
+    static AUTO_SCC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let wave_scc = *AUTO_SCC.get_or_init(|| std::env::var_os("VICTORY_WAVE_SCC").is_none_or(|v| v != "0"));
+    structure_with_scc(program, wide, wave_scc)
+}
+
+pub(crate) fn structure_with_scc(program: &Program, wide: &HashSet<usize>, wave_scc: bool) -> Result<Structured, ShaderError> {
     let mut l = Lanes::new(program)?;
     l.wide = wide.clone();
     loop {
-        let execs = l.masks_in_order();
+        let execs = l.masks_in_order(wave_scc);
         let cond = l.paths()?;
         let (wrong, new_derived) = l.check_joins(&cond);
         if l.b.overflow {
@@ -666,7 +682,7 @@ impl<'a> Lanes<'a> {
 
     /// Lane masks, branch conditions and forward-edge knowledge, block by
     /// block in reverse postorder; returns EXEC at each instruction reading it.
-    fn masks_in_order(&mut self) -> Vec<Vec<Option<Bool>>> {
+    fn masks_in_order(&mut self, wave_scc: bool) -> Vec<Vec<Option<Bool>>> {
         let p = self.p;
         let input = |reg| p.inputs.iter().find(|i| i.0 == reg).map(|i| i.1);
         if let Some(lo) = input(Reg::S(EXEC)) {
@@ -715,7 +731,7 @@ impl<'a> Lanes<'a> {
             {
                 self.when[b] = Some(self.branch(last));
                 self.wave_any[b] = self.wave_kind(last);
-                if !PER_LANE.get()
+                if wave_scc && !PER_LANE.get()
                     && matches!(last.name(), "s_cbranch_scc0" | "s_cbranch_scc1")
                     && let Some(scc) = last.read(Reg::Scc)
                     && self.scc_lane.contains_key(&scc)
