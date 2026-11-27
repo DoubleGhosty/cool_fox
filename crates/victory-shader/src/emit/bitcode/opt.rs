@@ -229,14 +229,24 @@ pub(super) fn effect(f: &Func) -> Effect {
 impl Module {
     /// Runs the clean-up passes named in `passes` ([`ALL`]: every one).
     pub(crate) fn optimise(&mut self, passes: u32) {
+        let check = std::env::var_os("VICTORY_OPT_CHECK").is_some();
+        if check {
+            self.check_homes("lowering");
+        }
         if passes & (FOLD | REUSE | FACTS | LOADS) != 0 {
             // Values merged in one round can make two joins the same in
             // the next (a loop's registers that only go round), and a
             // branch that goes one way leaves blocks with one way in.
-            for _ in 0..4 {
+            for round in 0..4 {
                 let mut changed = self.merge(passes);
+                if check {
+                    self.check_homes(&format!("merge round {round}"));
+                }
                 if passes & FOLD != 0 {
                     changed |= self.prune();
+                    if check {
+                        self.check_homes(&format!("prune round {round}"));
+                    }
                 }
                 if !changed {
                     break;
@@ -245,6 +255,83 @@ impl Module {
         }
         if passes & DEAD != 0 {
             self.drop_dead();
+            if check {
+                self.check_homes("drop_dead");
+            }
+        }
+    }
+
+    /// Diagnostics (`VICTORY_OPT_CHECK`): every value a reached block reads
+    /// is made in some block.
+    fn check_homes(&self, after: &str) {
+        let mut home = vec![usize::MAX; self.insts.len()];
+        for (b, blk) in self.blocks.iter().enumerate() {
+            for &i in blk.phis.iter().chain(&blk.body) {
+                home[i as usize] = b;
+            }
+        }
+        let reached = self.reached();
+        let lost = |j: u32| home[j as usize] == usize::MAX || !reached[home[j as usize]];
+        for (b, blk) in self.blocks.iter().enumerate() {
+            if !reached[b] {
+                continue;
+            }
+            for &i in blk.phis.iter().chain(&blk.body) {
+                let mut reads: Vec<(V, Option<usize>)> = Vec::new();
+                match &self.insts[i as usize].op {
+                    Op::Phi(inc) => {
+                        reads.extend(inc.iter().filter(|x| reached[x.1]).map(|&(v, f)| (v, Some(f))))
+                    }
+                    op => for_each_operand(op, |v| reads.push((v, None))),
+                }
+                for (v, via) in reads {
+                    if let V::Inst(j) = v
+                        && lost(j)
+                    {
+                        let h = home[j as usize];
+                        let about = |x: usize| {
+                            if x >= self.blocks.len() {
+                                return String::new();
+                            }
+                            let preds: Vec<usize> = (0..self.blocks.len())
+                                .filter(|&p| successors(self.blocks[p].term).contains(&x))
+                                .collect();
+                            format!(
+                                "\n  block {x}: reached={} term={:?} preds={preds:?} redirect={:?} follow={} phis={} body={}",
+                                reached[x],
+                                self.blocks[x].term,
+                                self.redirect.get(&x),
+                                self.follow(x),
+                                self.blocks[x].phis.len(),
+                                self.blocks[x].body.len()
+                            )
+                        };
+                        let redirects: Vec<_> = self.redirect.iter().collect();
+                        eprintln!(
+                            "VICTORY_OPT_CHECK detail:{}{}{}\n  redirects={redirects:?}",
+                            about(h),
+                            about(via.unwrap_or(usize::MAX)),
+                            about(b)
+                        );
+                        panic!(
+                            "after {after}: inst {i} in block {b} (via {via:?}) ({:?}) reads inst {j} \
+                             in block {} reached={} ({:?})",
+                            self.insts[i as usize].op,
+                            if h == usize::MAX { "none".to_string() } else { h.to_string() },
+                            h != usize::MAX && reached[h],
+                            self.insts[j as usize].op
+                        );
+                    }
+                }
+            }
+            if let Some(Term::CondBr(V::Inst(j), ..)) = blk.term
+                && lost(j)
+            {
+                panic!(
+                    "after {after}: the branch of block {b} reads inst {j} in no block ({:?})",
+                    self.insts[j as usize].op
+                );
+            }
         }
     }
 

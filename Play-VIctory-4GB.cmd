@@ -41,6 +41,10 @@ set "VICTORY_LEVELS_ON_DEMAND=1"
 set "VICTORY_CARD_BUFFERS_MIN_KB=4096"
 set "VICTORY_CARD_BUFFERS_MB=256"
 set "VICTORY_D3D12_BACKGROUND=0"
+rem The title ends itself (a write to 0 at +0x23cf683) when its main loop has
+rem not ticked for 30 s, as while its first frames wait for their compute
+rem pipelines: while bit 0 of title+0x71b6330 is set its watchdog starts over.
+if not defined VICTORY_POKE set "VICTORY_POKE=71b6330:1"
 if not defined VICTORY_LOG set "VICTORY_LOG=warn"
 
 "%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute
