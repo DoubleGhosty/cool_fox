@@ -432,6 +432,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float2 f = g - float2(g0);
     float4 sr = 0, sg = 0, sb = 0;
     float sum = 0;
+    float z_weighted = 0.0;
     for (int k = 0; k < 4; k++) {
         int2 q = clamp(g0 + int2(k & 1, k >> 1), int2(0, 0), int2(PX, PY) - 1);
         float z = seen(int2((float2(q) + 0.5) * size / float2(PX, PY)), size).z;
@@ -442,19 +443,23 @@ void raise(uint3 at : SV_DispatchThreadID) {
         sg += w * points[at0 + 1];
         sb += w * points[at0 + 2];
         sum += w;
+        z_weighted += w * z;
     }
-    float3 all = float3(sr.w, sg.w, sb.w) / sum;
-    found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
+    float3 all = float3(sr.w, sg.w, sb.w) / max(sum, 1e-6);
+    found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / max(sum, 1e-6);
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
     found = any((asuint(found) & 0x7f800000u) == 0x7f800000u) ? 0.0 : max(found, 0.0);
+    float mean_z = z_weighted / max(sum, 1e-6);
+    float depth_ratio = abs(mean_z - c.z) / max(min(c.z, mean_z), 0.1);
+    float confidence = saturate(1.0 - saturate((depth_ratio - 0.25) / 0.5));
     float3 was = unpack(light[p]);
     // What the program left counts as far as it can be true: the sky's light
     // outdoors, not the blocks of other memory.
     float top = max(dot(found, LUMA) * most, 1e-6);
     float has = dot(was, LUMA);
     was *= min(1.0, top / max(has, 1e-6));
-    light[p] = pack(max(was, found));
+    light[p] = pack(max(was, found * confidence));
 }
 #endif
 "#;
