@@ -41,13 +41,14 @@ if ($PSCmdlet.ParameterSetName -eq 'Run' -and -not (Test-Path $Exe)) { Write-Hos
 $paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR'
 Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
-if ($Shaders) { $Shaders = @((Resolve-Path $Shaders -ErrorAction Stop).Path) }
+if ($Shaders) { $Shaders = @((Resolve-Path -LiteralPath $Shaders -ErrorAction Stop).Path) }
 if ($Exe) { $Exe = (Resolve-Path $Exe).Path }
 Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
 try {
     switch ($PSCmdlet.ParameterSetName) {
-        'Warm' { & $victory warm --used }
-        'Shaders' { & $victory shaders @Shaders }
-        default { & $victory run $Exe --execute }
+        'Warm' { & $victory warm --used; $code = $LASTEXITCODE }
+        'Shaders' { & $victory shaders @Shaders; $code = $LASTEXITCODE }
+        default { & $victory run $Exe --execute; $code = $LASTEXITCODE }
     }
 } finally { Pop-Location }
+exit $code
