@@ -424,8 +424,9 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float3 found;
     if (constant > 0.0) {
         found = float3(1.0, 0.98, 0.94) * constant * open;
+        float sky = saturate((c.z - 50.0) / 150.0);
         float3 was = unpack(light[p]);
-        light[p] = pack(max(was, found));
+        light[p] = pack(lerp(found, max(was, found), sky));
         return;
     }
     // Between the four points around, those at its own depth first; which
@@ -453,16 +454,18 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
     found = any((asuint(found) & 0x7f800000u) == 0x7f800000u) ? 0.0 : max(found, 0.0);
-    float mean_z = z_weighted / max(sum, 1e-6);
-    float depth_ratio = abs(mean_z - c.z) / max(min(c.z, mean_z), 0.1);
-    float confidence = saturate(1.0 - saturate((depth_ratio - 0.25) / 0.5));
     float3 was = unpack(light[p]);
     // What the program left counts as far as it can be true: the sky's light
     // outdoors, not the blocks of other memory.
     float top = max(dot(found, LUMA) * most, 1e-6);
     float has = dot(was, LUMA);
     was *= min(1.0, top / max(has, 1e-6));
-    light[p] = pack(max(was, found * confidence));
+    // On indoor surfaces and characters (z < 50m), CS_ScreenProbes_TemporalResolve
+    // without ray tracing leaves uninitialized probe tile blocks (the blocky square
+    // artifacts on faces and hair). The clean indirect estimate `found` replaces them.
+    // Distant sky / outdoor horizon (z > 200m) blends in `was` to retain sky luminance.
+    float sky = saturate((c.z - 50.0) / 150.0);
+    light[p] = pack(lerp(found, max(was, found), sky));
 }
 #endif
 "#;
