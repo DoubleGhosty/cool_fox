@@ -3453,7 +3453,7 @@ static WIDE_WRITES: Mutex<Option<std::collections::HashMap<(usize, usize, usize)
 /// `address`, through a root view of `pipeline`, a view in a table (0) or a
 /// raw address (1).
 #[cfg(feature = "diagnostics")]
-pub(crate) fn wide_write(address: u64, len: u64, pipeline: usize) {
+pub(crate) fn wide_write(address: u64, len: u64, pipeline: usize, table: bool) {
     // Also the small ones (a page or less): fills of a few hundred bytes
     // wait for flights that declare exactly their range, and nothing said
     // which pass declares it.
@@ -3467,14 +3467,20 @@ pub(crate) fn wide_write(address: u64, len: u64, pipeline: usize) {
     let mut all = WIDE_WRITES.lock().unwrap_or_else(|e| e.into_inner());
     let e = all
         .get_or_insert_with(Default::default)
-        .entry((address as usize, (address + len) as usize, pipeline))
+        // (A table's writes keyed apart from a root view's of the same pipeline.)
+        .entry((address as usize, (address + len) as usize, pipeline ^ usize::from(table) << (usize::BITS - 1)))
         .or_insert_with(|| {
-            let shaders = match pipeline {
-                0 => "a view in a table".into(),
-                1 => "a raw address".into(),
-                p => crate::pipeline::host_pipeline(p as crate::object::This).map_or_else(String::new, |p| {
+            let hashes = |p: usize| {
+                crate::pipeline::host_pipeline(p as crate::object::This).map_or_else(String::new, |p| {
                     p.stages.iter().map(|s| s.shader.hash.to_string()).collect::<Vec<_>>().join("+")
-                }),
+                })
+            };
+            let shaders = match (pipeline, table) {
+                (0, _) => "a view in a table".into(),
+                (1, _) => "a raw address".into(),
+                // What declares the range, not that it wrote there.
+                (p, true) => format!("a view in a table of {}", hashes(p)),
+                (p, false) => hashes(p),
             };
             (0, shaders)
         });

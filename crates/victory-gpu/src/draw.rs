@@ -2062,7 +2062,7 @@ impl State {
             s.refresh(list, a, len);
             if writes {
                 #[cfg(feature = "diagnostics")]
-                crate::host::wide_write(a, len, self.pipeline);
+                crate::host::wide_write(a, len, self.pipeline, false);
                 s.gpu_writes(list, a, len);
             }
         };
@@ -5004,7 +5004,7 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
                 // A small one is named by its pipeline, if a table's walk
                 // set it; the wide ones stay "a view in a table".
                 #[cfg(feature = "diagnostics")]
-                crate::host::wide_write(address, len, if len <= 4096 { WRITER.get() } else { 0 });
+                crate::host::wide_write(address, len, if len <= 4096 { WRITER.get() } else { 0 }, true);
                 shadow.gpu_writes(list, address, len);
             } else {
                 #[cfg(feature = "diagnostics")]
