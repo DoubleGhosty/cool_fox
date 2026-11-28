@@ -319,6 +319,15 @@ impl Module {
         self.constant(ty, Const::Aggregate(ids))
     }
 
+    /// `x` if `v` is `sub 0, x` (an integer negation).
+    pub fn negated(&self, v: V) -> Option<V> {
+        let V::Inst(i) = v else { return None };
+        match self.insts[i as usize].op {
+            Op::Bin(Bin::Sub, zero, x) if self.int_value(zero) == Some(0) => Some(x),
+            _ => None,
+        }
+    }
+
     /// The value of an integer constant; `None` for anything else.
     pub fn int_value(&self, v: V) -> Option<i64> {
         match v {

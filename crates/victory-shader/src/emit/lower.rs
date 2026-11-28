@@ -5891,6 +5891,8 @@ impl<'a> Lower<'a> {
         }
         let at = self.begin_guarded(guard);
         let r = match rmw {
+            Some(Rmw::Sub) => self.lds_subtract(p, v0),
+            Some(Rmw::Add) if let Some(x) = self.s.m.negated(v0) => self.lds_subtract(p, x),
             Some(op) => self.s.m.atomic(self.cur, op, p, v0),
             // Compare with data0, store data1.
             None => self
@@ -6130,6 +6132,26 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
         }
+    }
+
+    /// An atomic subtract of `x` from the LDS dword at `p`: its old value.
+    ///
+    /// Written as an add of `x` times -1 read from the first lane, which the
+    /// driver cannot fold back into a subtract. NVIDIA's compiler (driver
+    /// 621.40, RTX 5070 Ti) refuses any pipeline with a group-shared atomic
+    /// subtract (`atomicrmw sub`, or `atomicrmw add` of `0 - x`, which it
+    /// turns into one) with `E_OUTOFMEMORY`, DXC's own output of
+    /// `InterlockedAdd(g, -x)` included; an add of `x * WaveReadLaneFirst(-1)`
+    /// it takes. (weatherParticle's `CS_BeginUpdate`, #129, was the one
+    /// program of the title's without a pipeline on that card.) The lanes
+    /// that run the atomic run the wave read, so it is -1 in each of them.
+    fn lds_subtract(&mut self, p: V, x: V) -> V {
+        let c = self.cur;
+        let (i32t, all) = (self.s.t.i32, self.s.m.i32(u32::MAX));
+        let minus_one = self.s.op(c, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[all]);
+        self.s.flags |= flags::WAVE_OPS;
+        let minus_x = self.s.m.bin(c, Bin::Mul, x, minus_one);
+        self.s.m.atomic(c, super::bitcode::Rmw::Add, p, minus_x)
     }
 
     /// Writes to buffers made before are seen, by every group, before those made after.
