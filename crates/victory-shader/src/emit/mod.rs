@@ -525,10 +525,18 @@ pub fn emit(
     // lanes whose own bit went the other way, but drawn. Dropped, its dispatch leaves what
     // it writes unwritten, and the title read that back as a pointer: a write to 0 at
     // +0x23cf683 loading the boat cutscene (#80) right after `ff6fdf23ce0b9048` failed so.
+    // Whatever stopped every form, so long as the program has such branches
+    // ([`structure::Structured::wave_scc`]; splitting per lane changes nothing else): on a host of
+    // 32-lane waves the wave64 forms of `CS_DefragHeap_ProcessFreeRequests` stopped at
+    // those branches and the program was refused as having no wave32 lowering, and
+    // `CS_ApplyAeroWakesToWindField`'s exact form at a first-lane read; their dispatches
+    // were dropped and the title ended the run 30 s later at +0x23cf683, on every load
+    // under Proton on an RTX 5060 (the same as #86, #89, #90 report on Windows). Split per
+    // lane, 31 of the 35 compute programs that run's cards refused translate.
     // `VICTORY_LANE_SPLIT=exact` refuses such a program instead.
-    let refused_wide = matches!(&exact,
-        Err(ShaderError::Unsupported { what, .. }) if *what == lower::WAVE_WIDE_ELSEWHERE);
-    if !refused_wide || st.wave_scc.is_empty() || std::env::var_os("VICTORY_LANE_SPLIT").is_some_and(|v| v == "exact") {
+    let refused = matches!(&exact, Err(ShaderError::Unsupported { .. }));
+    // (`st.wide` is empty here: the wave-wide set is built inside the forms that use it.)
+    if !refused || st.wave_scc.is_empty() || std::env::var_os("VICTORY_LANE_SPLIT").is_some_and(|v| v == "exact") {
         return exact;
     }
     let again = structure::with_per_lane(|| {
