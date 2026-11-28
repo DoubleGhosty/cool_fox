@@ -21,21 +21,21 @@ if not exist "%runner%" (
   echo Extract the Windows release or run cargo build --release --locked -p victory. 1>&2
   exit /b 2
 )
-rem Resolution & Upscaler (1440x810 output with 0.60 internal render scale cuts fillrate by ~50% on 8GB cards; upscaler 6 avoids FFX latency)
-if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1440x810"
-if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.60"
+rem Resolution & Upscaler (1280x720 is a valid title mode; with 0.667 render scale cuts fillrate by >60% on 8GB cards; upscaler 6 avoids FFX latency)
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1280x720"
+if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.667"
 if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
 rem Hair strands, simulation passes & accessories rendering
 if not defined VICTORY_HAIR set "VICTORY_HAIR=1"
 rem Ambient lighting & volumetric air/fog march ceiling (prevents purple veil & window blowout; shade=0 eliminates horizontal face bands)
-rem AMBIENT_MOST=2.5 reduces max probe cap (was 4.0) to cut GPU work and tamp overly bright sky-leaked probes
-rem AMBIENT_AIR and AMBIENT_MARCH reduced to 0.7 to further cut volumetric cost and rogue blue probe artifacts
+rem AMBIENT_MOST=2.0 reduces max probe cap to cut GPU work and tamp overly bright sky-leaked probes
+rem AMBIENT_AIR=0.3 and AMBIENT_MARCH=0.3 eliminate blinding white fog blowout in daylight transitions
 if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1"
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.7"
-if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=0.7"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.3"
+if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=0.3"
 if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.0,0.0"
-if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=200,2"
-if not defined VICTORY_AMBIENT_MOST set "VICTORY_AMBIENT_MOST=2.5"
+if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=100,1.5"
+if not defined VICTORY_AMBIENT_MOST set "VICTORY_AMBIENT_MOST=2.0"
 rem World geometry & room wall rendering (prevents scissor-culling from cutting away interior room walls)
 if not defined VICTORY_SCISSOR_TEST set "VICTORY_SCISSOR_TEST=full"
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
@@ -66,19 +66,17 @@ if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=6"
 if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
 if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=0"
 rem GPU buffer acceleration & pipelined relay (stage 2 ensures readbacks land before present to render all room walls)
-rem CARD_STEPS=3 adds extra barrier cycle for missing-ceiling/wall cases (frames 19-21)
-rem RELAY=3 with RELAY_COPY=2 forces double-barrier present sync to fix geometry clipping
 if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=512"
-if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=3"
+if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=2"
 if not defined VICTORY_TEXTURE_NO_WAIT set "VICTORY_TEXTURE_NO_WAIT=1"
-if not defined VICTORY_RELAY set "VICTORY_RELAY=3"
+if not defined VICTORY_RELAY set "VICTORY_RELAY=2"
 if not defined VICTORY_LATE_WAIT set "VICTORY_LATE_WAIT=2"
 if not defined VICTORY_WIDE_BACK set "VICTORY_WIDE_BACK=1"
 if not defined VICTORY_CARD_REHASH_RUNS set "VICTORY_CARD_REHASH_RUNS=1"
 if not defined VICTORY_JOIN_COPIES set "VICTORY_JOIN_COPIES=1"
 if not defined VICTORY_INDIRECT_WINDOW set "VICTORY_INDIRECT_WINDOW=1"
-if not defined VICTORY_RELAY_COPY set "VICTORY_RELAY_COPY=2"
+if not defined VICTORY_RELAY_COPY set "VICTORY_RELAY_COPY=1"
 if not defined VICTORY_INDIRECT_BATCH set "VICTORY_INDIRECT_BATCH=2"
 if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
