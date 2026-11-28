@@ -983,7 +983,7 @@ fn emit_program(
         };
     }
     // (DexNom/VIctory 5f4c3df4.)
-    if native.stage == HwStage::Vs
+    if matches!(native.stage, HwStage::Vs | HwStage::Ms)
         && let Some(psv) = c.part(FourCC::PSV0)
     {
         vertex_output_interpolation(psv.data, &mut outputs)?;
@@ -1057,8 +1057,9 @@ fn emit_program(
     Ok((shader, wave_size))
 }
 
-/// The title's vertex output interpolation lives in PSV0. A float packed
-/// beside an integer can be explicitly constant, as can a float on its own.
+/// The title's vertex output interpolation (a vertex or mesh program's)
+/// lives in PSV0. A float packed beside an integer can be explicitly
+/// constant, as can a float on its own.
 /// OSG1 supplies the physical rows and columns used to match both tables.
 fn vertex_output_interpolation(
     mut data: &[u8],
@@ -1078,7 +1079,9 @@ fn vertex_output_interpolation(
     let info = take(&mut data, info_size)?;
     // PSVRuntimeInfo0 has no signature. PSVRuntimeInfo1 and later share
     // these stage and signature count fields.
-    if info.len() < 36 || info[24] != 1 || info[29] == 0 {
+    // Vertex (1) and mesh (13) programs; a mesh program's primitive
+    // elements come after its vertex outputs and are left alone.
+    if info.len() < 36 || !matches!(info[24], 1 | 13) || info[29] == 0 {
         return Ok(());
     }
     let resources = size(&mut data)?;
