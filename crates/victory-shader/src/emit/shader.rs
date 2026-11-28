@@ -263,6 +263,31 @@ pub(crate) struct Shader {
     pub entry: usize,
 }
 
+/// Pixel input rows that the program never reads and whose elements
+/// disagree on their interpolation mode become constant: the validator
+/// refuses a row of two modes ("has interpolation mode that differs from
+/// another element packed into the same row"), and constant suits every
+/// type. The console packed such rows (the `_Fire` foliage and prop
+/// programs: a uint TEXCOORD5 or the front face beside a float TEXCOORD9,
+/// none of them read). A row with a read element takes that element's mode
+/// above.
+fn one_mode_a_row(inputs: &mut [SigElement]) {
+    let rows: Vec<u32> = inputs.iter().filter_map(|e| e.row).collect();
+    for row in rows {
+        let in_row = || inputs.iter().filter(|e| e.row == Some(row));
+        let mut modes = in_row().map(|e| e.interp);
+        let first = modes.next();
+        if modes.all(|m| Some(m) == first) {
+            continue;
+        }
+        if in_row().all(|e| matches!(e.kind, 0 | 13) && e.usage == 0) {
+            for e in inputs.iter_mut().filter(|e| e.row == Some(row)) {
+                e.interp = 1;
+            }
+        }
+    }
+}
+
 impl Shader {
     pub fn new(pixel: bool) -> Self {
         let mut m = Module::default();
@@ -575,6 +600,7 @@ impl Shader {
                     self.inputs[index].interp = mode;
                 }
             }
+            one_mode_a_row(&mut self.inputs);
         }
         let ud_size = (self.user_data * 4).next_multiple_of(16);
         self.fix_user_data_size(ud_size);
@@ -1034,5 +1060,43 @@ impl Shader {
             list.push(Some(self.m.md_node(ops)));
         }
         Some(self.m.md_node(list))
+    }
+}
+
+#[cfg(test)]
+mod one_mode_tests {
+    use super::*;
+
+    fn element(name: &str, kind: u8, comp: u8, interp: u8, col: u8, usage: u8) -> SigElement {
+        SigElement {
+            name: name.into(),
+            index: 0,
+            kind,
+            comp,
+            interp,
+            row: Some(7),
+            col,
+            cols: 1,
+            usage,
+            half: false,
+        }
+    }
+
+    /// The `_Fire` pixel programs' row 7: a uint, a float and the front
+    /// face, none read. One mode for all of them; a row with a read element
+    /// keeps its modes (it took the read one's above, or must say so).
+    #[test]
+    fn an_unread_row_of_two_modes_becomes_constant() {
+        let mut inputs = vec![
+            element("TEXCOORD", 0, 5, 1, 0, 0),
+            element("TEXCOORD", 0, 9, 2, 1, 0),
+            element("SV_IsFrontFace", 13, 5, 1, 2, 0),
+        ];
+        one_mode_a_row(&mut inputs);
+        assert!(inputs.iter().all(|e| e.interp == 1));
+
+        let mut read = vec![element("TEXCOORD", 0, 5, 1, 0, 0), element("TEXCOORD", 0, 9, 2, 1, 1)];
+        one_mode_a_row(&mut read);
+        assert_eq!(read.iter().map(|e| e.interp).collect::<Vec<_>>(), [1, 2]);
     }
 }

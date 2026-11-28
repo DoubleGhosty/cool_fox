@@ -465,6 +465,51 @@ mod tests {
             .is_err());
     }
 
+    /// A mesh program's outputs take the modes its PSV0 declares too: the
+    /// title's mesh programs pack a float beside an integer and declare the
+    /// float constant, which the validator wants of a shared row.
+    #[test]
+    fn mesh_outputs_take_the_declared_interpolation() {
+        let integer = SigElement {
+            name: "TEXCOORD".into(),
+            index: 8,
+            kind: 0,
+            comp: 5,
+            interp: 1,
+            row: Some(0),
+            col: 0,
+            cols: 3,
+            usage: 7,
+            half: false,
+        };
+        let float = SigElement {
+            index: 11,
+            comp: 9,
+            col: 3,
+            cols: 1,
+            usage: 1,
+            ..integer.clone()
+        };
+        let outputs = [integer, float];
+        let psv = psv(&Psv {
+            stage: 13,
+            flag: false,
+            inputs: &[],
+            outputs: &outputs,
+            prims: &[],
+            mesh: None,
+            geometry: None,
+            bindings: &[],
+            threads: [0; 3],
+            wave_size: None,
+        });
+        // As the signature defaults declare them: the float smooth.
+        let mut declared = outputs.clone();
+        declared[1].interp = 2;
+        super::super::vertex_output_interpolation(&psv, &mut declared).unwrap();
+        assert_eq!(declared.iter().map(|e| e.interp).collect::<Vec<_>>(), [1, 1]);
+    }
+
     #[test]
     fn psv_keeps_repeated_arbitrary_semantic_names() {
         let element = SigElement {
