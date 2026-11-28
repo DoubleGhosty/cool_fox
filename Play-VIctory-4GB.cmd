@@ -10,6 +10,10 @@ if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
 )
 set "runner=%~dp0target\release\victory.exe"
 if not exist "%runner%" set "runner=%~dp0victory-3d-rtx-pareto-residency.exe"
+if not exist "%runner%" (
+  echo victory.exe not found: build it first with cargo build --release --locked -p victory ^(see README.md^). 1>&2
+  exit /b 2
+)
 
 set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
 set "VICTORY_AMBIENT_AIR=1.5"
