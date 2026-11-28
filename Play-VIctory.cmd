@@ -21,30 +21,35 @@ if not exist "%runner%" (
   echo Extract the Windows release or run cargo build --release --locked -p victory. 1>&2
   exit /b 2
 )
-rem Resolution & Upscaler (1664x936 output with 0.667 internal render scale cuts fillrate by >40% on 8GB cards; upscaler 6 avoids FFX latency)
-if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1664x936"
-if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.667"
+rem Resolution & Upscaler (1440x810 output with 0.60 internal render scale cuts fillrate by ~50% on 8GB cards; upscaler 6 avoids FFX latency)
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1440x810"
+if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.60"
 if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
 rem Hair strands, simulation passes & accessories rendering
 if not defined VICTORY_HAIR set "VICTORY_HAIR=1"
 rem Ambient lighting & volumetric air/fog march ceiling (prevents purple veil & window blowout; shade=0 eliminates horizontal face bands)
+rem AMBIENT_MOST=2.5 reduces max probe cap (was 4.0) to cut GPU work and tamp overly bright sky-leaked probes
+rem AMBIENT_AIR and AMBIENT_MARCH reduced to 0.7 to further cut volumetric cost and rogue blue probe artifacts
 if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1"
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.8"
-if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=0.8"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.7"
+if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=0.7"
 if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.0,0.0"
-if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=250,2"
+if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=200,2"
+if not defined VICTORY_AMBIENT_MOST set "VICTORY_AMBIENT_MOST=2.5"
 rem World geometry & room wall rendering (prevents scissor-culling from cutting away interior room walls)
 if not defined VICTORY_SCISSOR_TEST set "VICTORY_SCISSOR_TEST=full"
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
 rem DirectStorage streaming & staging (accelerates geometry/wall streaming to eliminate missing cutscene walls)
-if not defined VICTORY_DSTORAGE_STAGING_MB set "VICTORY_DSTORAGE_STAGING_MB=512"
+rem 768 MB staging buffer (was 512) prevents frame-22-style texture stripe corruption under heavy streaming load
+if not defined VICTORY_DSTORAGE_STAGING_MB set "VICTORY_DSTORAGE_STAGING_MB=768"
 if not defined VICTORY_DSTORAGE_WORKERS set "VICTORY_DSTORAGE_WORKERS=8"
 rem Memory trimming & VRAM management (prevents 99% RAM stall & NVMe pagefile thrashing)
+rem 4096 MB texture budget (was 3584) gives more headroom before eviction on the RTX 4060 8GB
 if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
 if not defined VICTORY_TEXTURE_KEEP set "VICTORY_TEXTURE_KEEP=2"
 if not defined VICTORY_TEXTURE_SWEEP set "VICTORY_TEXTURE_SWEEP=part"
-if not defined VICTORY_TEXTURE_BUDGET_MB set "VICTORY_TEXTURE_BUDGET_MB=3584"
-if not defined VICTORY_TEXTURE_STAGE_MB set "VICTORY_TEXTURE_STAGE_MB=192"
+if not defined VICTORY_TEXTURE_BUDGET_MB set "VICTORY_TEXTURE_BUDGET_MB=4096"
+if not defined VICTORY_TEXTURE_STAGE_MB set "VICTORY_TEXTURE_STAGE_MB=256"
 if not defined VICTORY_RECHECK_SOON set "VICTORY_RECHECK_SOON=1"
 if not defined VICTORY_STAGING_IDLE_MS set "VICTORY_STAGING_IDLE_MS=2000"
 if not defined VICTORY_WINDOW_IDLE_MS set "VICTORY_WINDOW_IDLE_MS=2000"
@@ -52,31 +57,35 @@ if not defined VICTORY_LIST_IDLE_TRIM_S set "VICTORY_LIST_IDLE_TRIM_S=10"
 if not defined VICTORY_READ_KEEP_MB set "VICTORY_READ_KEEP_MB=256"
 if not defined VICTORY_SCRATCH_SPARE_MB set "VICTORY_SCRATCH_SPARE_MB=128"
 if not defined VICTORY_SEND_SPARE_MB set "VICTORY_SEND_SPARE_MB=128"
-rem CPU multi-threaded list translation (tuned for i5-13400F 6 P-cores)
+rem CPU multi-threaded list translation (tuned for i5-13400F 6 P-cores; 8 thin threads uses E-cores too)
 if not defined VICTORY_THIN set "VICTORY_THIN=1"
-if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=6"
-if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
+if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=8"
+if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=10"
 if not defined VICTORY_ASYNC_SUBMIT set "VICTORY_ASYNC_SUBMIT=1"
-if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=4"
+if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=6"
 if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
 if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=0"
 rem GPU buffer acceleration & pipelined relay (stage 2 ensures readbacks land before present to render all room walls)
+rem CARD_STEPS=3 adds extra barrier cycle for missing-ceiling/wall cases (frames 19-21)
+rem RELAY=3 with RELAY_COPY=2 forces double-barrier present sync to fix geometry clipping
 if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=512"
-if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=2"
+if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=3"
 if not defined VICTORY_TEXTURE_NO_WAIT set "VICTORY_TEXTURE_NO_WAIT=1"
-if not defined VICTORY_RELAY set "VICTORY_RELAY=2"
+if not defined VICTORY_RELAY set "VICTORY_RELAY=3"
 if not defined VICTORY_LATE_WAIT set "VICTORY_LATE_WAIT=2"
 if not defined VICTORY_WIDE_BACK set "VICTORY_WIDE_BACK=1"
 if not defined VICTORY_CARD_REHASH_RUNS set "VICTORY_CARD_REHASH_RUNS=1"
 if not defined VICTORY_JOIN_COPIES set "VICTORY_JOIN_COPIES=1"
 if not defined VICTORY_INDIRECT_WINDOW set "VICTORY_INDIRECT_WINDOW=1"
-if not defined VICTORY_RELAY_COPY set "VICTORY_RELAY_COPY=1"
+if not defined VICTORY_RELAY_COPY set "VICTORY_RELAY_COPY=2"
 if not defined VICTORY_INDIRECT_BATCH set "VICTORY_INDIRECT_BATCH=2"
 if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
 if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
 if not defined VICTORY_TEXTURE_GUARD set "VICTORY_TEXTURE_GUARD=0"
+rem Chromatic aberration fringe suppression (red/green left-edge fringing visible in Lucia outdoor close-ups)
+if not defined VICTORY_CHROMATIC set "VICTORY_CHROMATIC=0"
 rem Renderer ports 6 & 7 (write-guard lock sharing, journal split) save 2-5 ms per frame
 if not defined VICTORY_PORT_GUARD set "VICTORY_PORT_GUARD=1"
 if not defined VICTORY_PORT_JOURNAL set "VICTORY_PORT_JOURNAL=1"

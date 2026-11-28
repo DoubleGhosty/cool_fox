@@ -263,6 +263,8 @@ void keep(uint3 at : SV_DispatchThreadID) {
         // Wine's compiler lacks).
         c = any((asuint(c) & 0x7f800000u) == 0x7f800000u) ? 0.0 : c;
         // Lamps and glints count, but not for everything.
+        // Clamp any rogue single-channel spikes (blue floating blobs) per cell.
+        c = min(c, float3(30.0, 30.0, 30.0));
         sum += c / max(1.0, dot(c, LUMA) / 20.0);
     }
     cells[at.y * CX + at.x] = float4(sum / 25.0, 1.0);
@@ -460,11 +462,12 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float top = max(dot(found, LUMA) * most, 1e-6);
     float has = dot(was, LUMA);
     was *= min(1.0, top / max(has, 1e-6));
-    // On indoor surfaces and characters (z < 50m), CS_ScreenProbes_TemporalResolve
+    // On indoor surfaces and characters (z < 100m), CS_ScreenProbes_TemporalResolve
     // without ray tracing leaves uninitialized probe tile blocks (the blocky square
     // artifacts on faces and hair). The clean indirect estimate `found` replaces them.
-    // Distant sky / outdoor horizon (z > 200m) blends in `was` to retain sky luminance.
-    float sky = saturate((c.z - 50.0) / 150.0);
+    // Distant sky / outdoor horizon (z > 250m) blends in `was` to retain sky luminance.
+    // Wider replacement zone (100m instead of 50m) catches mid-range cutscene geometry.
+    float sky = saturate((c.z - 100.0) / 150.0);
     light[p] = pack(lerp(found, max(was, found), sky));
 }
 #endif
