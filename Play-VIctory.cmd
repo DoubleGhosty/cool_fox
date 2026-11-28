@@ -4,59 +4,97 @@ if not "%~1"=="" if /i not "%~1"=="pareto-residency" (
   echo Usage: Play-VIctory.cmd pareto-residency 1>&2
   exit /b 2
 )
+if not defined VICTORY_GAME_DIR if exist "%~dp0victory.toml" (
+  for /f "tokens=1,2 delims='" %%A in ('findstr /i "game_dir" "%~dp0victory.toml"') do set "VICTORY_GAME_DIR=%%B"
+)
 if not defined VICTORY_GAME_DIR (
-  echo Set VICTORY_GAME_DIR to the folder containing your title executable. 1>&2
+  echo Set VICTORY_GAME_DIR to the folder containing your title executable, or configure [paths].game_dir in victory.toml. 1>&2
   exit /b 2
 )
 if not exist "%VICTORY_GAME_DIR%\game_scarlett_master.exe" (
   echo game_scarlett_master.exe not found in VICTORY_GAME_DIR: "%VICTORY_GAME_DIR%" 1>&2
   exit /b 2
 )
-set "runner=%~dp0victory-3d-rtx-pareto-residency.exe"
-if not exist "%runner%" set "runner=%~dp0target\release\victory.exe"
+set "runner=%~dp0target\release\victory.exe"
+if not exist "%runner%" set "runner=%~dp0victory-3d-rtx-pareto-residency.exe"
 if not exist "%runner%" (
   echo Extract the Windows release or run cargo build --release --locked -p victory. 1>&2
   exit /b 2
 )
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.5"
+rem Resolution & Upscaler (1280x720 is a valid title mode; with 0.667 render scale cuts fillrate by >60% on 8GB cards; upscaler 6 avoids FFX latency)
+if not defined VICTORY_OUTPUT set "VICTORY_OUTPUT=1280x720"
+if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.667"
+if not defined VICTORY_UPSCALER set "VICTORY_UPSCALER=6"
+rem Hair strands, simulation passes & accessories rendering
+if not defined VICTORY_HAIR set "VICTORY_HAIR=1"
+rem Ambient lighting & volumetric air/fog march ceiling (prevents purple veil & window blowout; shade=0 eliminates horizontal face bands)
+rem AMBIENT_MOST=2.0 reduces max probe cap to cut GPU work and tamp overly bright sky-leaked probes
+rem AMBIENT_AIR=0.3 and AMBIENT_MARCH=0.3 eliminate blinding white fog blowout in daylight transitions
+if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=1"
+if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=0.3"
+if not defined VICTORY_AMBIENT_MARCH set "VICTORY_AMBIENT_MARCH=0.3"
+if not defined VICTORY_AMBIENT_SHADE set "VICTORY_AMBIENT_SHADE=0.0,0.0"
+if not defined VICTORY_AMBIENT_SETTLE set "VICTORY_AMBIENT_SETTLE=100,1.5"
+if not defined VICTORY_AMBIENT_MOST set "VICTORY_AMBIENT_MOST=2.0"
+rem World geometry & room wall rendering (prevents scissor-culling from cutting away interior room walls)
+if not defined VICTORY_SCISSOR_TEST set "VICTORY_SCISSOR_TEST=full"
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
+rem DirectStorage streaming & staging (accelerates geometry/wall streaming to eliminate missing cutscene walls)
+rem 768 MB staging buffer (was 512) prevents frame-22-style texture stripe corruption under heavy streaming load
+if not defined VICTORY_DSTORAGE_STAGING_MB set "VICTORY_DSTORAGE_STAGING_MB=768"
+if not defined VICTORY_DSTORAGE_WORKERS set "VICTORY_DSTORAGE_WORKERS=8"
+rem Memory trimming & VRAM management (prevents 99% RAM stall & NVMe pagefile thrashing)
+rem 4096 MB texture budget (was 3584) gives more headroom before eviction on the RTX 4060 8GB
+if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
+if not defined VICTORY_TEXTURE_KEEP set "VICTORY_TEXTURE_KEEP=2"
+if not defined VICTORY_TEXTURE_SWEEP set "VICTORY_TEXTURE_SWEEP=part"
+if not defined VICTORY_TEXTURE_BUDGET_MB set "VICTORY_TEXTURE_BUDGET_MB=4096"
+if not defined VICTORY_TEXTURE_STAGE_MB set "VICTORY_TEXTURE_STAGE_MB=256"
+if not defined VICTORY_RECHECK_SOON set "VICTORY_RECHECK_SOON=1"
+if not defined VICTORY_STAGING_IDLE_MS set "VICTORY_STAGING_IDLE_MS=2000"
+if not defined VICTORY_WINDOW_IDLE_MS set "VICTORY_WINDOW_IDLE_MS=2000"
+if not defined VICTORY_LIST_IDLE_TRIM_S set "VICTORY_LIST_IDLE_TRIM_S=10"
+if not defined VICTORY_READ_KEEP_MB set "VICTORY_READ_KEEP_MB=256"
+if not defined VICTORY_SCRATCH_SPARE_MB set "VICTORY_SCRATCH_SPARE_MB=128"
+if not defined VICTORY_SEND_SPARE_MB set "VICTORY_SEND_SPARE_MB=128"
+rem CPU multi-threaded list translation (tuned for i5-13400F 6 P-cores; 8 thin threads uses E-cores too)
+if not defined VICTORY_THIN set "VICTORY_THIN=1"
+if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=8"
+if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=10"
+if not defined VICTORY_ASYNC_SUBMIT set "VICTORY_ASYNC_SUBMIT=1"
+if not defined VICTORY_FAST_CORES set "VICTORY_FAST_CORES=6"
+if not defined VICTORY_D3D12_BACKGROUND set "VICTORY_D3D12_BACKGROUND=0"
+if not defined VICTORY_TITLE_PRIORITIES set "VICTORY_TITLE_PRIORITIES=0"
+rem GPU buffer acceleration & pipelined relay (stage 2 ensures readbacks land before present to render all room walls)
+if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
+if not defined VICTORY_CARD_BUFFERS_MB set "VICTORY_CARD_BUFFERS_MB=512"
+if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=2"
 if not defined VICTORY_TEXTURE_NO_WAIT set "VICTORY_TEXTURE_NO_WAIT=1"
 if not defined VICTORY_RELAY set "VICTORY_RELAY=2"
+if not defined VICTORY_LATE_WAIT set "VICTORY_LATE_WAIT=2"
 if not defined VICTORY_WIDE_BACK set "VICTORY_WIDE_BACK=1"
 if not defined VICTORY_CARD_REHASH_RUNS set "VICTORY_CARD_REHASH_RUNS=1"
 if not defined VICTORY_JOIN_COPIES set "VICTORY_JOIN_COPIES=1"
 if not defined VICTORY_INDIRECT_WINDOW set "VICTORY_INDIRECT_WINDOW=1"
 if not defined VICTORY_RELAY_COPY set "VICTORY_RELAY_COPY=1"
-if not defined VICTORY_CARD_STEPS set "VICTORY_CARD_STEPS=2"
 if not defined VICTORY_INDIRECT_BATCH set "VICTORY_INDIRECT_BATCH=2"
 if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
 if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
-rem A constant, not the frame estimate: walking into a bright doorway raised
-rem the estimate and washed the whole frame out. constant:1.0 is even light.
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=constant:0.8"
-rem The write guard misses some titles' writes: skin on a guard's arms and the
-rem phone's frame read garbage (colour noise) until every check hashed the
-rem texture again. Costs some CPU; the frame rate held at 5-7 fps here.
 if not defined VICTORY_TEXTURE_GUARD set "VICTORY_TEXTURE_GUARD=0"
-rem The asynchronous submission paths stay off on NVIDIA: with THIN the head
-rem skin of people in play is not drawn (eyes and teeth are), and JOIN_PARTS
-rem repeats frames of the opening video. Set them to 1 to try instead.
-if not defined VICTORY_THIN set "VICTORY_THIN=0"
-if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=0"
-rem Renderer ports 6 & 7 (write-guard lock sharing, journal split) save 2-5 ms
-rem per frame and are safe on every tested GPU. Ports 1 & 5 stay opt-in: on
-rem 8 GB NVIDIA cards PORT_CBV=1 can drop road surfaces and
-rem PORT_CONSTANTS+PORT_CBV can raise a C++ exception (#15).
+rem Chromatic aberration fringe suppression (red/green left-edge fringing visible in Lucia outdoor close-ups)
+if not defined VICTORY_CHROMATIC set "VICTORY_CHROMATIC=0"
+rem Renderer ports 6 & 7 (write-guard lock sharing, journal split) save 2-5 ms per frame
 if not defined VICTORY_PORT_GUARD set "VICTORY_PORT_GUARD=1"
 if not defined VICTORY_PORT_JOURNAL set "VICTORY_PORT_JOURNAL=1"
 if not defined VICTORY_PORT_CONSTANTS set "VICTORY_PORT_CONSTANTS=0"
 if not defined VICTORY_PORT_CBV set "VICTORY_PORT_CBV=0"
 if not defined VICTORY_LIBRARY_STORE_LATER set "VICTORY_LIBRARY_STORE_LATER=1"
 if not defined VICTORY_PIPELINE_WAIT_MS set "VICTORY_PIPELINE_WAIT_MS=0"
+if not defined VICTORY_PIPELINE_WORKERS set "VICTORY_PIPELINE_WORKERS=8"
+if not defined VICTORY_SCREEN_WAIT_MS set "VICTORY_SCREEN_WAIT_MS=0"
+if not defined VICTORY_PIPELINE_BOOK set "VICTORY_PIPELINE_BOOK=1"
 if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
-if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
-if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn"
 rem Series X, not S: on an 8 GB card series-s drops the head/skin meshes (faces
 rem render as eyes and teeth only); series-x renders them. Verified 2026-11-26.

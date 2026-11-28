@@ -56,8 +56,10 @@ pub(crate) fn room(memory: Option<[u64; 4]>) {
             0
         } else if pressure {
             1
+        } else if crate::residency::limited_host_ram() {
+            2
         } else {
-            limit
+            STAGING_KEPT.min(limit)
         };
         pool.reclaim(tick, staging_limit, true);
     }

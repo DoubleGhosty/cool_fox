@@ -263,6 +263,8 @@ void keep(uint3 at : SV_DispatchThreadID) {
         // Wine's compiler lacks).
         c = any((asuint(c) & 0x7f800000u) == 0x7f800000u) ? 0.0 : c;
         // Lamps and glints count, but not for everything.
+        // Clamp any rogue single-channel spikes (blue floating blobs) per cell.
+        c = min(c, float3(30.0, 30.0, 30.0));
         sum += c / max(1.0, dot(c, LUMA) / 20.0);
     }
     cells[at.y * CX + at.x] = float4(sum / 25.0, 1.0);
@@ -278,7 +280,8 @@ void mean() {
     // followed at once, as a new room is.)
     float a = max(dot(now, LUMA), 1e-5), b = max(dot(was.rgb, LUMA), 1e-5);
     float share = (jump > 0.0 && max(a / b, b / a) > jump) ? 1.0 : follow;
-    cells[CELLS] = float4(was.a > 0.0 ? lerp(was.rgb, now, share) : now, 1.0);
+    float3 updated = was.a > 0.0 ? lerp(was.rgb, now, share) : now;
+    cells[CELLS] = float4(min(updated, 1.0), 1.0);
 }
 #endif
 
@@ -346,6 +349,7 @@ void clear_air(uint3 at : SV_DispatchThreadID) {
         float far = float(at.z) / float(d);
         cap = air * lerp(dot(cells[CELLS].rgb, LUMA), dot(seen_there, LUMA), far);
     }
+    cap = min(cap, 0.10);
     float3 c = scattered[at];
     // A NaN or infinity in the air is summed along every view ray through
     // it: black or white patches floating in the room (tested as in `keep`).
@@ -368,7 +372,8 @@ void clear_march(uint3 at : SV_DispatchThreadID) {
     float4 c = marched[at.xy];
     // (NaN or infinity: tested as in `keep`.)
     if (any((asuint(c.rgb) & 0x7f800000u) == 0x7f800000u)) { marched[at.xy] = float4(0.0, 0.0, 0.0, c.a); return; }
-    float cap = air * dot(cells[CELLS].rgb, LUMA);
+    float mean_luma = clamp(constant > 0.0 ? constant : dot(cells[CELLS].rgb, LUMA), 0.01, 0.20);
+    float cap = min(air * mean_luma, 0.06);
     float has = dot(c.rgb, LUMA);
     if (has > cap) marched[at.xy] = float4(c.rgb * (cap / has), c.a);
 }
@@ -407,7 +412,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float noise = frac(52.9829189 * frac(dot(float2(p), float2(0.06711056, 0.00583715))));
     if (strength > 0.0 && px >= 1.5 && c.z < 400.0) {
         float sum = 0.0;
-        const int N = 12;
+        const int N = 8;
         for (int i = 0; i < N; i++) {
             float a = i * 2.399963 + noise * 6.2831853;
             float2 o = float2(cos(a), sin(a)) * (sqrt((i + 0.5) / N) * px);
@@ -421,7 +426,9 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float3 found;
     if (constant > 0.0) {
         found = float3(1.0, 0.98, 0.94) * constant * open;
-        light[p] = pack(found);
+        float sky = saturate((c.z - 50.0) / 150.0);
+        float3 was = unpack(light[p]);
+        light[p] = pack(lerp(found, max(was, found), sky));
         return;
     }
     // Between the four points around, those at its own depth first; which
@@ -431,6 +438,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float2 f = g - float2(g0);
     float4 sr = 0, sg = 0, sb = 0;
     float sum = 0;
+    float z_weighted = 0.0;
     for (int k = 0; k < 4; k++) {
         int2 q = clamp(g0 + int2(k & 1, k >> 1), int2(0, 0), int2(PX, PY) - 1);
         float z = seen(int2((float2(q) + 0.5) * size / float2(PX, PY)), size).z;
@@ -441,9 +449,10 @@ void raise(uint3 at : SV_DispatchThreadID) {
         sg += w * points[at0 + 1];
         sb += w * points[at0 + 2];
         sum += w;
+        z_weighted += w * z;
     }
-    float3 all = float3(sr.w, sg.w, sb.w) / sum;
-    found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
+    float3 all = float3(sr.w, sg.w, sb.w) / max(sum, 1e-6);
+    found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / max(sum, 1e-6);
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
     found = any((asuint(found) & 0x7f800000u) == 0x7f800000u) ? 0.0 : max(found, 0.0);
@@ -453,7 +462,13 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float top = max(dot(found, LUMA) * most, 1e-6);
     float has = dot(was, LUMA);
     was *= min(1.0, top / max(has, 1e-6));
-    light[p] = pack(max(was, found));
+    // On indoor surfaces and characters (z < 100m), CS_ScreenProbes_TemporalResolve
+    // without ray tracing leaves uninitialized probe tile blocks (the blocky square
+    // artifacts on faces and hair). The clean indirect estimate `found` replaces them.
+    // Distant sky / outdoor horizon (z > 250m) blends in `was` to retain sky luminance.
+    // Wider replacement zone (100m instead of 50m) catches mid-range cutscene geometry.
+    float sky = saturate((c.z - 100.0) / 150.0);
+    light[p] = pack(lerp(found, max(was, found), sky));
 }
 #endif
 "#;
@@ -660,7 +675,7 @@ pub(crate) fn clear_march(list: &HostList, image: This) -> bool {
         return false;
     };
     // (The slow mean: none with the constant, none before a keeping.)
-    if !matches!(set(), Set::Estimate(_)) || !KEPT.load(Ordering::Relaxed) {
+    if matches!(set(), Set::Off) || (matches!(set(), Set::Estimate(_)) && !KEPT.load(Ordering::Relaxed)) {
         return false;
     }
     let Some(copy) = crate::resource::host_copy(image) else {
@@ -694,6 +709,9 @@ pub(crate) fn clear_march(list: &HostList, image: This) -> bool {
     list.keep(&pass.cells);
     list.keep(&pass.points);
     let mut words = [0u32; 11];
+    if let Set::Constant(v) = set() {
+        words[1] = v.to_bits();
+    }
     words[10] = march().to_bits();
     let l = &list.list;
     // (The title's gathers before it wrote the image through other views.)
