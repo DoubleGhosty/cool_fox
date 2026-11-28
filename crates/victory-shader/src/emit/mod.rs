@@ -743,7 +743,11 @@ fn emit_forms(
                         Some(p),
                     ];
                     if let Some(base) = bases.into_iter().flatten().next() {
-                        let again = if defrag {
+                        let paired = wide_on && native.wave64 && lower::host_max_wave() == 32
+                            && matches!(native.io, crate::native::StageIo::Cs(cs)
+                                if (128..=1024).contains(&cs.threads.iter().product::<u32>())
+                                    && cs.threads.iter().product::<u32>() % 64 == 0);
+                        let again = if defrag || paired {
                             lower::with_half_meets(|| widen(c, native, base, why, driver_loop))
                         } else {
                             widen(c, native, base, why, driver_loop)
@@ -846,9 +850,9 @@ fn emit_forms(
 /// branches around its cross-lane code taken wave-wide ([`structure::structure_wide`]): the
 /// lowering names the blocks where the two host waves must meet and could not
 /// (`lower::take_needs`), the branches whose regions hold them are widened, and so on until
-/// it translates or a branch cannot be widened. Only where a thread group is one console
-/// wave: with several, the waves of a group would decide differently and a barrier inside
-/// such a branch would wait for threads that never come.
+/// it translates or a branch cannot be widened. Groups with several console waves need
+/// per-wave rendezvous: the waves may choose different branches, so a whole-group barrier
+/// inside those branches would wait for threads that never arrive.
 fn widen(
     c: &Container,
     native: &NativeProgram,
@@ -864,9 +868,11 @@ fn widen(
         // (a program whose waves are the host's meets no one: no barrier, any group)
         crate::native::StageIo::Cs(_) if !(native.wave64 && lower::host_max_wave() == 32) => {}
         crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 64 => {}
-        // One program only: two console waves, and a meet per wave instead of a group barrier.
+        // Each complete console wave meets its own two host halves.
         crate::native::StageIo::Cs(cs)
-            if lower::half_meets() && cs.threads.iter().product::<u32>() == 128 => {}
+            if lower::half_meets()
+                && (64..=1024).contains(&cs.threads.iter().product::<u32>())
+                && cs.threads.iter().product::<u32>() % 64 == 0 => {}
         crate::native::StageIo::Cs(cs) => {
             if why {
                 wave_why!("WAVE64-WIDE not tried: thread groups of {:?}", cs.threads);

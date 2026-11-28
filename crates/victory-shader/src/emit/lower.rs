@@ -506,7 +506,8 @@ fn every_thread_blocks(st: &Structured) -> Option<Vec<bool>> {
     Some(all)
 }
 
-/// Per-lane branch regions. `skip_wide` leaves out branches the wave takes together.
+/// Branch regions. `skip_wide` leaves out branches uniform within one console wave;
+/// a group-wide convergence check includes those too, since other waves may disagree.
 fn control_regions(st: &Structured, skip_wide: bool) -> Option<Vec<(usize, Vec<bool>)>> {
     let n = st.exits.len();
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -548,8 +549,8 @@ fn control_regions(st: &Structured, skip_wide: bool) -> Option<Vec<(usize, Vec<b
     let mut regions = Vec::new();
     for (d, e) in st.exits.iter().enumerate() {
         let LaneExit::Branch { when, .. } = *e else { continue };
-        if (skip_wide && st.wide.contains(&d))
-            || st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_)))
+        if skip_wide && (st.wide.contains(&d)
+            || st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_))))
         {
             continue; // a wave-wide or uniform branch: all lanes go the same way
         }
@@ -1397,8 +1398,8 @@ thread_local! {
 /// The host's group-shared memory, in dwords (32 KiB).
 const HOST_LDS_DWORDS: u32 = 8192;
 
-/// Runs `f` while a group of two console waves orders its halves with a per-wave meet
-/// instead of a group barrier, where not every thread of the group arrives.
+/// Runs `f` while console waves order their own host halves with per-wave rendezvous
+/// instead of group barriers where other console waves need not arrive.
 pub(super) fn with_half_meets<R>(f: impl FnOnce() -> R) -> R {
     let was = HALF_MEETS.replace(true);
     let r = f();
@@ -4667,13 +4668,10 @@ impl<'a> Lower<'a> {
                 self.meet_refuse = Some("a half-meet where not every lane runs");
             }
             block
-        } else if block != self.cur || self.s.m.is_terminated(block) {
-            // A per-wave wait splits the block and moves the lowering cursor.
-            // A deferred exchange cannot replace this predecessor's existing branch.
-            self.meet_refuse
-                .get_or_insert("a deferred exchange needs a per-wave meet in a closed block");
-            block
         } else {
+            // A deferred exchange may meet in a block that has already branched on (the
+            // entry, an earlier block's tail): `half_meet_at` moves that branch to the
+            // meet's continuation and leaves the lowering cursor where it was.
             self.half_meet_at(block)
         };
         if block == self.cur {
@@ -4699,6 +4697,16 @@ impl<'a> Lower<'a> {
         {
             self.half_meet_count += 1;
         }
+        // A value made where it was defined and asked across the halves later meets in a
+        // block that has already branched on (the entry, an earlier block's tail): its
+        // branch moves to the meet's continuation, and the lowering goes on where it was.
+        let resume = self.cur;
+        let block = self.s.m.follow(block);
+        let left = self.s.m.take_term(block);
+        // Publishing the arrival counter must not become visible before
+        // this half's shared payload. Atomics alone are not an LDS fence.
+        let fence = self.s.m.i32(8);
+        self.s.op(block, "barrier", Attr::NoDuplicate, self.s.t.void, 80, &[fence]);
         let thread = self.console_thread();
         let sixty3 = self.s.m.i32(63);
         let in_wave = self.s.m.bin(block, Bin::And, thread, sixty3);
@@ -4723,8 +4731,10 @@ impl<'a> Lower<'a> {
         let zero = self.s.m.i32(0);
         let first = self.s.m.cmp(block, pred::EQ, lane_in_half, zero);
         // Publish on this half's dword, then wait on the other half's. One lane of the
-        // half does each: the other lanes take that lane's value. A plain load waits,
-        // so the publisher is the only writer of its dword.
+        // half does each: the other lanes take that lane's value. Poll atomically too:
+        // a volatile LDS load hung the AMD wave32 PPPC kernels while the peer's
+        // arrival was published with an atomic. Adding zero observes the same
+        // atomic counter without advancing its generation.
         let (yes, no, join) = (self.s.m.new_block(), self.s.m.new_block(), self.s.m.new_block());
         self.s.m.terminate(block, Term::CondBr(first, yes, no));
         let lds = self.s.lds();
@@ -4744,7 +4754,7 @@ impl<'a> Lower<'a> {
         let (lyes, lno, ljoin) = (self.s.m.new_block(), self.s.m.new_block(), self.s.m.new_block());
         self.s.m.terminate(wait, Term::CondBr(first, lyes, lno));
         let theirs = self.s.m.element(lyes, lds, other);
-        let seen_yes = self.s.m.load_volatile(lyes, theirs);
+        let seen_yes = self.s.m.atomic(lyes, Rmw::Add, theirs, zero);
         self.s.m.terminate(lyes, Term::Br(ljoin));
         self.s.m.terminate(lno, Term::Br(ljoin));
         let seen_lane = self.s.m.phi(ljoin, i32t);
@@ -4755,16 +4765,24 @@ impl<'a> Lower<'a> {
         self.s.m.terminate(ljoin, Term::CondBr(ready, done, wait));
         let start = self.s.m.i32(0);
         self.s.m.set_phi(polls, vec![(start, join), (polled, ljoin)]);
+        // After seeing the peer's arrival, its payload can be read. This
+        // fence orders memory only; it does not wait for unrelated waves.
+        self.s.op(done, "barrier", Attr::NoDuplicate, self.s.t.void, 80, &[fence]);
         self.cur = done;
         let who = self.tally_lane(done);
         let guarded = self.begin_guarded(Some(who));
         let here = self.cur;
         self.lds_tally(here, 0, one);
         self.lds_tally(here, 1, polled);
+        self.lds_tally(here, 2, polled);
         self.end_guarded(guarded, &[]);
         let after = self.cur;
         // The rest of this instruction was aimed at the block the meet closed.
         self.s.m.continues(block, after);
+        if let Some(t) = left {
+            self.s.m.terminate(after, t);
+        }
+        self.cur = if self.s.m.follow(resume) == after { after } else { resume };
         after
     }
 
@@ -4822,22 +4840,26 @@ impl<'a> Lower<'a> {
         }
         let n = self.meet_cap * 2 * self.meet_waves.max(1) + 3;
         let entry = self.s.entry;
-        let (head, done) = (self.s.m.new_block(), self.s.m.new_block());
+        let (head, body, done) = (self.s.m.new_block(), self.s.m.new_block(), self.s.m.new_block());
+        let i32t = self.s.t.i32;
+        let thread = self.s.op(entry, "flattenedThreadIdInGroup.i32", Attr::ReadNone, i32t, 96, &[]);
         self.s.m.terminate(entry, Term::Br(head));
         let i = self.s.m.phi(head, self.s.t.i32);
-        let base = self.s.m.i32(self.meet_base);
-        let idx = self.s.m.bin(head, Bin::Add, base, i);
-        let lds = self.s.lds();
-        let ptr = self.s.m.element(head, lds, idx);
-        let zero = self.s.m.i32(0);
-        self.s.m.store(head, ptr, zero);
-        let one = self.s.m.i32(1);
-        let next = self.s.m.bin(head, Bin::Add, i, one);
         let last = self.s.m.i32(n);
-        let more = self.s.m.cmp(head, pred::IULT, next, last);
-        self.s.m.terminate(head, Term::CondBr(more, head, done));
-        let start = self.s.m.i32(0);
-        self.s.m.set_phi(i, vec![(start, entry), (next, head)]);
+        let more = self.s.m.cmp(head, pred::IULT, i, last);
+        self.s.m.terminate(head, Term::CondBr(more, body, done));
+        let base = self.s.m.i32(self.meet_base);
+        let idx = self.s.m.bin(body, Bin::Add, base, i);
+        let lds = self.s.lds();
+        let ptr = self.s.m.element(body, lds, idx);
+        let zero = self.s.m.i32(0);
+        self.s.m.store(body, ptr, zero);
+        // Clear each dword once across the group, instead of every thread
+        // clearing the entire rendezvous table independently.
+        let stride = self.s.m.i32(self.s.threads.expect("compute group").iter().product());
+        let next = self.s.m.bin(body, Bin::Add, i, stride);
+        self.s.m.terminate(body, Term::Br(head));
+        self.s.m.set_phi(i, vec![(thread, entry), (next, body)]);
         self.group_sync(done);
         self.s.entry = done;
     }

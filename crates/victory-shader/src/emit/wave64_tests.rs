@@ -1029,14 +1029,133 @@ fn a_mask_ballot_in_a_uniform_predecessor_keeps_its_branch() {
 }
 
 #[test]
-fn a_deferred_ballot_in_a_wave_only_predecessor_is_refused() {
-    let Err(ShaderError::Unsupported { what, .. }) = deferred_ballot(true) else {
-        panic!("a closed predecessor reached by only part of the group needs a per-wave meet");
-    };
-    assert_eq!(
-        what,
-        "a deferred exchange needs a per-wave meet in a closed block"
-    );
+fn a_deferred_ballot_in_a_wave_only_predecessor_meets_there() {
+    // The meet goes in the closed predecessor: its branch moves to the meet's
+    // continuation (it was replaced before, and the blocks after it went unreached).
+    let mut shader = deferred_ballot(true).expect("a per-wave meet in a closed block");
+    assert_eq!(shader.root_uavs, [super::SLOT_MEET]);
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        v.validate(&mut shader.dxil)
+            .expect("valid DXIL for the deferred exchange");
+    }
+}
+
+/// Every console wave loops wave_id+1 times. Only lanes >= the supplied
+/// cutoff write, and they read the first active lane's value on each visit.
+/// The waves therefore meet different numbers of times in the same group.
+fn independently_looping_waves(threads: u32) -> NativeProgram {
+    let mut words = vec![
+        0x340A_0082, // v_lshlrev_b32 v5, 2, v0: output address
+        0x2C0C_0086, // v_lshrrev_b32 v6, 6, v0: console wave id
+        0x7E20_0506, // v_readfirstlane_b32 s16, v6
+        0x8011_8110, // s_add_u32 s17, s16, 1: loop count
+        0xBE92_0380, // s_mov_b32 s18, 0: iteration
+        0xBE93_107E, // s_bcnt1_i32_b64 s19, exec: wave64 lane count
+        0x360E_00BF, // v_and_b32 v7, 63, v0: console lane
+        0x7D86_0E00, // v_cmp_le_u32 vcc, s0, v7
+        0xBE8C_246A, // s_and_saveexec_b64 s[12:13], vcc
+        0xBF88_0000, // s_cbranch_execz to restore
+    ];
+    let skip = words.len() - 1;
+    let head = words.len();
+    words.extend([
+        0x4A04_0012, // v_add_nc_u32 v2, s18, v0
+        0x7E28_0502, // v_readfirstlane_b32 s20, v2
+        0x7E04_0214, // v_mov_b32 v2, s20
+        0x4A04_0413, // v_add_nc_u32 v2, s19, v2
+        0xE070_1000, 0x8002_0205, // buffer_store_dword v2, v5, s[8:11]
+        0x8012_8112, // s_add_u32 s18, s18, 1
+        0xBF0A_1112, // s_cmp_lt_u32 s18, s17
+    ]);
+    let back = (head as i32 - (words.len() as i32 + 1)) as i16;
+    words.push(0xBF85_0000 | u32::from(back as u16)); // s_cbranch_scc1
+    words[skip] |= (words.len() - skip - 1) as u32;
+    words.push(0xBEFE_040C); // restore EXEC
+    native_of(&words, true, threads)
+}
+
+fn emit_independently_looping_waves(threads: u32) -> HostShader {
+    let native = independently_looping_waves(threads);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("native IR");
+    let c = crate::dxbc::build(&[]);
+    let container = crate::Container::parse(&c).expect("test container");
+    let was = lower::TEST_HOST_WAVE.replace(Some(32));
+    let shader = lower::with_half_meets(|| super::widen(&container, &native, &p, false, false))
+        .map(|(shader, _)| shader);
+    lower::TEST_HOST_WAVE.set(was);
+    shader.expect("independent wave64 control flow")
+}
+
+#[test]
+fn independent_wave_loops_translate_and_validate() {
+    for threads in [128, 256] {
+        let mut shader = emit_independently_looping_waves(threads);
+        validator::Validator::load(None).expect("DXIL validator")
+            .validate(&mut shader.dxil).expect("independent waves validate");
+        assert_eq!(shader.root_uavs, [super::SLOT_MEET]);
+    }
+}
+
+#[test]
+#[ignore = "requires a D3D12 device that executes Wave32"]
+fn independent_wave_loops_preserve_first_active_lane_on_gpu() {
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    use windows::Win32::Graphics::{Direct3D::*, Direct3D12::*, Dxgi::*};
+    let mut hosts = Vec::new();
+    // SAFETY: read adapter capabilities and create devices; submissions below
+    // use the same checked Dispatch helper as the other GPU tests.
+    unsafe {
+        let factory: IDXGIFactory4 = CreateDXGIFactory2(Default::default()).expect("DXGI factory");
+        for index in 0.. {
+            let Ok(adapter) = factory.EnumAdapters1(index) else { break };
+            let desc = adapter.GetDesc1().expect("adapter description");
+            if desc.Flags & 2 != 0 { continue; }
+            let mut device: Option<ID3D12Device> = None;
+            if D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device).is_err() { continue; }
+            let device = device.expect("created device");
+            let mut lanes = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+            device.CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, (&raw mut lanes).cast(),
+                size_of_val(&lanes) as u32).expect("wave capabilities");
+            let mut sm = D3D12_FEATURE_DATA_SHADER_MODEL { HighestShaderModel: D3D_SHADER_MODEL_6_6 };
+            if device.CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, (&raw mut sm).cast(),
+                size_of_val(&sm) as u32).is_err() || sm.HighestShaderModel.0 < D3D_SHADER_MODEL_6_6.0
+                || !lanes.WaveOps.as_bool() || lanes.WaveLaneCountMin > 32 || lanes.WaveLaneCountMax < 32 {
+                continue;
+            }
+            hosts.push((desc.VendorId, Host { device }));
+        }
+    }
+    assert!(!hosts.is_empty(), "a hardware Wave32 GPU is required");
+    for (vendor, host) in hosts {
+    let mut comparisons = 0;
+    for threads in [128, 256] {
+        let shader = emit_independently_looping_waves(threads);
+        let (root, pso) = host.compute_pipeline(&shader).expect("wave32 pipeline");
+        for _ in 0..8 {
+            for cutoff in [0, 1, 16, 32, 47, 63, 64] {
+                let mut ud = vec![0; shader.user_data_dwords().max(1) as usize];
+                for u in &shader.user_data {
+                    if u.root == RootType::Constants && u.slot == 0 && u.dword == 0 {
+                        ud[u.index as usize] = cutoff;
+                    }
+                }
+                let result = host.dispatch(&root, &pso, &Dispatch {
+                    roots: vec![(0, Root::Constants(ud)), (1, Root::Uav(1))],
+                    views: &[View::RawUav(threads), View::RawUav(3)],
+                    samplers: &[], groups: [1, 1, 1],
+                }).expect("independent wave dispatch");
+                for (thread, &value) in result[0].iter().enumerate() {
+                    let wave = thread as u32 / 64;
+                    let expected = if thread as u32 % 64 >= cutoff { 64 + wave * 65 + cutoff } else { 0 };
+                    assert_eq!(value, expected, "{threads} threads, cutoff {cutoff}, thread {thread}");
+                    comparisons += 1;
+                }
+                assert!(result[1][0] > 0 || cutoff == 64, "per-wave rendezvous must execute");
+            }
+        }
+    }
+    eprintln!("vendor {vendor:#x}: {comparisons} independent-wave lane comparisons passed");
+    }
 }
 
 #[test]
