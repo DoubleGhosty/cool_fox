@@ -4723,8 +4723,10 @@ impl<'a> Lower<'a> {
         let zero = self.s.m.i32(0);
         let first = self.s.m.cmp(block, pred::EQ, lane_in_half, zero);
         // Publish on this half's dword, then wait on the other half's. One lane of the
-        // half does each: the other lanes take that lane's value. A plain load waits,
-        // so the publisher is the only writer of its dword.
+        // half does each: the other lanes take that lane's value. Poll atomically too:
+        // a volatile LDS load hung the AMD wave32 PPPC kernels while the peer's
+        // arrival was published with an atomic. Adding zero observes the same
+        // atomic counter without advancing its generation.
         let (yes, no, join) = (self.s.m.new_block(), self.s.m.new_block(), self.s.m.new_block());
         self.s.m.terminate(block, Term::CondBr(first, yes, no));
         let lds = self.s.lds();
@@ -4744,7 +4746,7 @@ impl<'a> Lower<'a> {
         let (lyes, lno, ljoin) = (self.s.m.new_block(), self.s.m.new_block(), self.s.m.new_block());
         self.s.m.terminate(wait, Term::CondBr(first, lyes, lno));
         let theirs = self.s.m.element(lyes, lds, other);
-        let seen_yes = self.s.m.load_volatile(lyes, theirs);
+        let seen_yes = self.s.m.atomic(lyes, Rmw::Add, theirs, zero);
         self.s.m.terminate(lyes, Term::Br(ljoin));
         self.s.m.terminate(lno, Term::Br(ljoin));
         let seen_lane = self.s.m.phi(ljoin, i32t);
@@ -4761,6 +4763,7 @@ impl<'a> Lower<'a> {
         let here = self.cur;
         self.lds_tally(here, 0, one);
         self.lds_tally(here, 1, polled);
+        self.lds_tally(here, 2, polled);
         self.end_guarded(guarded, &[]);
         let after = self.cur;
         // The rest of this instruction was aimed at the block the meet closed.
